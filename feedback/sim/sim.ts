@@ -23,6 +23,8 @@ export interface SimConfig extends AgentOptions {
     /** "admin": flip the fault mid-run. "env": host was started with MONID_FAKE_FAULTS. */
     faultMode: "admin" | "env";
     snapshotIntervalMs: number;
+    /** The host's MONID_DECAY_HALF_LIFE_MS, for the report; the sim can't set it on a remote host. */
+    halfLifeMs?: number;
     /** Call POST /v1/admin/snapshot instead of waiting for the timer (deterministic). */
     forceSnapshot: boolean;
     seed: number;
@@ -43,6 +45,8 @@ interface Workspace {
 interface Window {
     ranks: number[];
     scores: number[];
+    /** results[].quality.term of the degraded endpoint, when the host sends it. */
+    terms: number[];
 }
 
 interface Traffic {
@@ -72,6 +76,9 @@ export function configFromEnv(
         errorRate: num("MONID_SIM_ERROR_RATE", 0.6),
         faultMode: env("MONID_SIM_FAULT_MODE") === "env" ? "env" : "admin",
         snapshotIntervalMs: num("MONID_SNAPSHOT_INTERVAL_MS", 60_000),
+        halfLifeMs: env("MONID_DECAY_HALF_LIFE_MS")
+            ? Number(env("MONID_DECAY_HALF_LIFE_MS"))
+            : undefined,
         forceSnapshot: env("MONID_SIM_FORCE_SNAPSHOT") === "1",
         seed: num("MONID_SIM_SEED", 42),
         limit: num("MONID_SIM_LIMIT", 5),
@@ -135,8 +142,8 @@ export async function runSim(
 
     const measure = async (): Promise<Record<Arm, Window>> => {
         const m = {
-            control: { ranks: [], scores: [] },
-            treatment: { ranks: [], scores: [] },
+            control: { ranks: [], scores: [], terms: [] },
+            treatment: { ranks: [], scores: [], terms: [] },
         } as Record<Arm, Window>;
         for (let n = 0; n < cfg.measureQueries; n++) {
             for (const w of workspaces) {
@@ -150,7 +157,10 @@ export async function runSim(
                     endpointId(r) === cfg.degrade
                 );
                 m[arm].ranks.push(i < 0 ? cfg.limit + 1 : i + 1); // not shown counts as limit + 1
-                if (i >= 0) m[arm].scores.push(d.results[i].score);
+                if (i < 0) continue;
+                m[arm].scores.push(d.results[i].score);
+                const term = d.results[i].quality?.term;
+                if (term !== undefined) m[arm].terms.push(term);
             }
         }
         return m;
@@ -203,6 +213,7 @@ export async function runSim(
     const rank = (w: Window) => mean(w.ranks);
     const drop = rank(after.treatment) - rank(before.treatment);
     const drift = Math.abs(rank(after.control) - rank(before.control));
+    const termAfter = mean(after.treatment.terms);
     const armCount = (a: Arm) => workspaces.filter((w) => w.arm === a).length;
 
     const checks: [boolean, string][] = [
@@ -234,6 +245,14 @@ export async function runSim(
                 fmt(rank(before.control))
             } -> ${fmt(rank(after.control))})`,
         ],
+        [
+            termAfter < 0,
+            after.treatment.terms.length
+                ? `treatment: ${cfg.degrade} own feedback term is negative after the fault (${
+                    fmtTerm(mean(before.treatment.terms))
+                } -> ${fmtTerm(termAfter)})`
+                : `treatment: ${cfg.degrade} own feedback term unknown: the host must expose results[].quality.term on discover`,
+        ],
     ];
 
     const pct = (
@@ -250,6 +269,8 @@ export async function runSim(
             pct(r1(after[a])).padStart(6),
             fmt(mean(before[a].scores)).padStart(7),
             fmt(mean(after[a].scores)).padStart(7),
+            fmtTerm(mean(before[a].terms)).padStart(7),
+            fmtTerm(mean(after[a].terms)).padStart(7),
             pct(warm ? warm[a].ok / warm[a].runs : NaN).padStart(6),
             pct(learn[a].ok / learn[a].runs).padStart(6),
             String((warm?.[a].feedback ?? 0) + learn[a].feedback).padStart(5),
@@ -261,12 +282,17 @@ export async function runSim(
         "works mechanically; it says nothing about real agents or real providers.",
         "",
         `host ${cfg.baseUrl}  leaf ${LEAF}  degraded ${cfg.degrade} (error_rate ${cfg.errorRate}, via ${cfg.faultMode})`,
+        `host decay half-life ${
+            cfg.halfLifeMs
+                ? `${cfg.halfLifeMs} ms`
+                : "not set (MONID_DECAY_HALF_LIFE_MS)"
+        }  snapshot interval ${cfg.snapshotIntervalMs} ms`,
         `seed ${cfg.seed}  limit ${cfg.limit}  warm-up ${
             warm ? cfg.warmupEpisodes : 0
         }  learning ${cfg.learnEpisodes}  measure ${cfg.measureQueries} queries/workspace`,
         "",
-        "                 mean rank      rank-1 share   mean score     run success",
-        "arm        before  after  before  after  before   after   warm  learn  fdbk",
+        "                 mean rank      rank-1 share   mean score      own term       run success",
+        "arm        before  after  before  after  before   after  before   after   warm  learn  fdbk",
         row("treatment"),
         row("control"),
         "",
@@ -276,6 +302,9 @@ export async function runSim(
 }
 
 const fmt = (x: number) => (Number.isFinite(x) ? x.toFixed(2) : "-");
+const fmtTerm = (
+    x: number,
+) => (Number.isFinite(x) ? `${x >= 0 ? "+" : ""}${x.toFixed(3)}` : "-");
 
 if (import.meta.main) {
     const { passed, report } = await runSim(configFromEnv());

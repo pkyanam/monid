@@ -1,16 +1,18 @@
 /**
  * TEST-ONLY stub of the Monid feedback host. It is a contract fixture for the
  * sim, not a second host: a fixed candidate list (no BM25), synthetic run
- * outputs, in-memory evidence with no decay or trust weighting, and a snapshot
+ * outputs, in-memory evidence with exponential decay and no trust weighting, and a snapshot
  * rebuilt on a timer with @monid/feedback-rerank.
  *
  * Env: HOST (default 127.0.0.1), PORT (default 8787), MONID_SNAPSHOT_INTERVAL_MS (default 60000),
  * MONID_FAKE_FAULTS ("provider#endpoint:error_rate=0.6[,empty_rate=0.1];..."),
- * MONID_ADMIN_KEY (optional; required bearer for /v1/admin/*).
+ * MONID_ADMIN_KEY (optional; required bearer for /v1/admin/*),
+ * MONID_DECAY_HALF_LIFE_MS (evidence half-life; unset = no decay).
  */
 import {
     buildSnapshot,
     type EvidenceRow,
+    lookup,
     rerank,
     type Snapshot,
 } from "@monid/feedback-rerank";
@@ -25,6 +27,10 @@ export interface StubOptions {
     faults?: string;
     adminKey?: string;
     seed?: number;
+    /** Evidence half-life; undefined or 0 = no decay. */
+    halfLifeMs?: number;
+    /** Leave results[].quality out, to test that the sim fails without it. */
+    omitQuality?: boolean;
 }
 
 interface Fault {
@@ -63,7 +69,11 @@ export function parseFaults(spec = ""): Map<string, Fault> {
 export function startStubHost(opts: StubOptions = {}) {
     const faults = parseFaults(opts.faults);
     const rand = rng(opts.seed ?? 7);
-    const evidence = new Map<string, EvidenceRow>();
+    // Each row is decayed to its own timestamp t: S <- S * d(dt) + new.
+    const evidence = new Map<string, EvidenceRow & { t: number }>();
+    const decay = (
+        dt: number,
+    ) => (opts.halfLifeMs ? 0.5 ** (dt / opts.halfLifeMs) : 1);
     const runs = new Map<string, Run>();
     let snapshot: Snapshot = buildSnapshot([], {
         version: 1,
@@ -72,7 +82,13 @@ export function startStubHost(opts: StubOptions = {}) {
     let seq = 0;
 
     const rebuild = () => {
-        snapshot = buildSnapshot(evidence.values(), {
+        const now = Date.now();
+        const rows = [...evidence.values()].map(({ t, ...row }) => ({
+            ...row,
+            s: row.s * decay(now - t),
+            f: row.f * decay(now - t),
+        }));
+        snapshot = buildSnapshot(rows, {
             version: snapshot.version + 1,
             builtAt: new Date().toISOString(),
         });
@@ -86,9 +102,16 @@ export function startStubHost(opts: StubOptions = {}) {
         f: number,
     ) => {
         const key = `${endpoint}|${aspect}`;
-        const row = evidence.get(key) ??
-            { endpoint, cluster: LEAF, aspect, s: 0, f: 0 };
-        evidence.set(key, { ...row, s: row.s + s, f: row.f + f });
+        const now = Date.now();
+        const prev = evidence.get(key) ??
+            { endpoint, cluster: LEAF, aspect, s: 0, f: 0, t: now };
+        const d = decay(now - prev.t);
+        evidence.set(key, {
+            ...prev,
+            s: prev.s * d + s,
+            f: prev.f * d + f,
+            t: now,
+        });
     };
 
     const json = (body: unknown, status = 200) =>
@@ -135,11 +158,26 @@ export function startStubHost(opts: StubOptions = {}) {
                     arm,
                 },
             );
-            const results = ranked.map((r) => ({
-                ...result(r.endpoint),
-                score: r.finalScore,
-                tags: [LEAF],
-            }));
+            const results = ranked.map((r) => {
+                // n = evidence behind the cell (reliability trials, decayed), 0 when there is none.
+                const { cell } = lookup(snapshot, r.endpoint, LEAF);
+                const n = cell
+                    ? cell.reliability.alpha + cell.reliability.beta -
+                        snapshot.params.k
+                    : 0;
+                return {
+                    ...result(r.endpoint),
+                    score: r.finalScore,
+                    tags: [LEAF],
+                    ...(!opts.omitQuality &&
+                        {
+                            quality: {
+                                term: r.term,
+                                n: Math.round(n * 10) / 10,
+                            },
+                        }),
+                };
+            });
             return json({
                 results,
                 query: body.query,
@@ -271,6 +309,7 @@ if (import.meta.main) {
         ),
         faults: Deno.env.get("MONID_FAKE_FAULTS"),
         adminKey: Deno.env.get("MONID_ADMIN_KEY"),
+        halfLifeMs: Number(Deno.env.get("MONID_DECAY_HALF_LIFE_MS") ?? 0),
     });
     console.log(`TEST-ONLY monid stub host on ${host.url}`);
 }

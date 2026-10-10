@@ -34,6 +34,8 @@ export interface DiscoverResult {
     price: { type: string; amount: unknown };
     score: number;
     tags: string[];
+    /** Feedback-host addition: the applied rerank term (0 in control) and the evidence behind it. */
+    quality?: { term: number; n?: number };
 }
 
 export interface DiscoverResponse {

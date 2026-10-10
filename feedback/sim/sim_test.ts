@@ -13,18 +13,32 @@ const simTest = (name: string, fn: () => Promise<void>) =>
 
 const env = (vars: Record<string, string>) => (k: string) => vars[k];
 const KEYS = "sim-a,sim-b,sim-c,sim-d";
+// Scaled down from the documented 60 s half-life / 60 s snapshots: a fast run
+// takes about a second, so evidence halves a few times over the learning phase.
+const FAST = {
+    MONID_SNAPSHOT_INTERVAL_MS: "100",
+    MONID_DECAY_HALF_LIFE_MS: "300",
+};
 
-async function simAgainstStub(vars: Record<string, string>, faults?: string) {
-    const timer = vars.MONID_SIM_FORCE_SNAPSHOT === "1" ? 3_600_000 : 100;
-    const host = startStubHost({ snapshotIntervalMs: timer, faults });
+async function simAgainstStub(
+    vars: Record<string, string>,
+    stub: { faults?: string; omitQuality?: boolean } = {},
+) {
+    const v: Record<string, string> = { ...FAST, ...vars };
+    const host = startStubHost({
+        ...stub,
+        snapshotIntervalMs: v.MONID_SIM_FORCE_SNAPSHOT === "1"
+            ? 3_600_000
+            : Number(v.MONID_SNAPSHOT_INTERVAL_MS),
+        halfLifeMs: Number(v.MONID_DECAY_HALF_LIFE_MS),
+    });
     try {
         return await runSim(configFromEnv(env({
             MONID_API_BASE_URL: host.url,
             MONID_SIM_KEYS: KEYS,
             MONID_SIM_ARMS: "treatment,control,treatment,control",
-            MONID_SNAPSHOT_INTERVAL_MS: "100",
             MONID_SIM_POLL_MS: "5",
-            ...vars,
+            ...v,
         })));
     } finally {
         await host.close();
@@ -45,8 +59,24 @@ simTest(
     async () => {
         const { passed, report } = await simAgainstStub({
             MONID_SIM_FAULT_MODE: "env",
-        }, "opoint#search:error_rate=0.6");
+        }, { faults: "opoint#search:error_rate=0.6" });
         assert(passed, report);
+    },
+);
+
+simTest(
+    "sim fails loudly when the host doesn't expose quality.term",
+    async () => {
+        const { passed, report } = await simAgainstStub({}, {
+            omitQuality: true,
+        });
+        assert(!passed);
+        assert(
+            report.includes(
+                "FAIL  treatment: opoint#search own feedback term unknown: the host must expose",
+            ),
+            report,
+        );
     },
 );
 
@@ -61,9 +91,13 @@ simTest("sim fails, not passes, when nothing is degraded", async () => {
 simTest(
     "with forced snapshots the sim is exactly reproducible for a fixed seed",
     async () => {
-        // With a timer, which snapshot a request sees depends on wall-clock timing.
+        // A snapshot timer and time-based decay both depend on the wall clock, so
+        // exact reproducibility needs forced snapshots and no decay.
         const run = async () =>
-            (await simAgainstStub({ MONID_SIM_FORCE_SNAPSHOT: "1" })).report
+            (await simAgainstStub({
+                MONID_SIM_FORCE_SNAPSHOT: "1",
+                MONID_DECAY_HALF_LIFE_MS: "0",
+            })).report
                 .replace(/^host .*$/m, "");
         const first = await run();
         assert(first.includes("PASS  treatment"), first);
