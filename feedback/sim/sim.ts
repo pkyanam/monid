@@ -9,7 +9,7 @@
  */
 import { type AgentOptions, episode } from "./agent.ts";
 import { hash, rng } from "./rng.ts";
-import { DEFAULT_DEGRADE, ENDPOINTS, LEAF, QUERIES } from "./scenario.ts";
+import { LEAF, QUERIES } from "./scenario.ts";
 import { type Arm, endpointId, MonidClient } from "./wire.ts";
 
 export interface SimConfig extends AgentOptions {
@@ -18,6 +18,7 @@ export interface SimConfig extends AgentOptions {
     /** Optional forced arm per key (X-Monid-Arm). */
     arms?: (Arm | undefined)[];
     adminKey?: string;
+    /** Endpoint id, or "auto": the one with the most successful warm-up runs. */
     degrade: string;
     errorRate: number;
     /** "admin": flip the fault mid-run. "env": host was started with MONID_FAKE_FAULTS. */
@@ -39,7 +40,7 @@ interface Workspace {
     client: MonidClient;
     rand: () => number;
     arm?: Arm;
-    inspected: Set<string>;
+    inspected: Map<string, Record<string, unknown> | undefined>;
 }
 
 interface Window {
@@ -53,6 +54,8 @@ interface Traffic {
     runs: number;
     ok: number;
     feedback: number;
+    /** Successful runs per endpoint id. */
+    okBy: Map<string, number>;
 }
 
 export function configFromEnv(
@@ -72,7 +75,7 @@ export function configFromEnv(
             a,
         ) => (a === "control" || a === "treatment" ? a : undefined)),
         adminKey: env("MONID_ADMIN_KEY"),
-        degrade: env("MONID_SIM_DEGRADE") ?? DEFAULT_DEGRADE,
+        degrade: env("MONID_SIM_DEGRADE") ?? "auto",
         errorRate: num("MONID_SIM_ERROR_RATE", 0.6),
         faultMode: env("MONID_SIM_FAULT_MODE") === "env" ? "env" : "admin",
         snapshotIntervalMs: num("MONID_SNAPSHOT_INTERVAL_MS", 60_000),
@@ -93,13 +96,14 @@ export function configFromEnv(
 }
 
 export async function runSim(
-    cfg: SimConfig,
+    config: SimConfig,
 ): Promise<{ passed: boolean; report: string }> {
+    let cfg = config;
     const workspaces: Workspace[] = cfg.keys.map((key, i) => ({
         client: new MonidClient(cfg.baseUrl, key, cfg.arms?.[i]),
         rand: rng(hash(`${cfg.seed}:${key}`)),
         arm: cfg.arms?.[i],
-        inspected: new Set(),
+        inspected: new Map(),
     }));
     const queryFor = (w: Workspace) =>
         QUERIES[Math.floor(w.rand() * QUERIES.length)];
@@ -117,9 +121,9 @@ export async function runSim(
     };
 
     const traffic = async (episodes: number): Promise<Record<Arm, Traffic>> => {
-        const t = {
-            control: { runs: 0, ok: 0, feedback: 0 },
-            treatment: { runs: 0, ok: 0, feedback: 0 },
+        const t: Record<Arm, Traffic> = {
+            control: { runs: 0, ok: 0, feedback: 0, okBy: new Map() },
+            treatment: { runs: 0, ok: 0, feedback: 0, okBy: new Map() },
         };
         for (let n = 0; n < episodes; n++) {
             for (const w of workspaces) {
@@ -135,6 +139,12 @@ export async function runSim(
                 t[arm].runs += ep.runs;
                 t[arm].ok += ep.ok;
                 t[arm].feedback += ep.feedback;
+                if (ep.okOn) {
+                    t[arm].okBy.set(
+                        ep.okOn,
+                        (t[arm].okBy.get(ep.okOn) ?? 0) + 1,
+                    );
+                }
             }
         }
         return t;
@@ -186,18 +196,21 @@ export async function runSim(
         }
     };
 
-    if (!ENDPOINTS.some((e) => e.id === cfg.degrade)) {
-        throw new Error(`${cfg.degrade} is not in the scenario`);
-    }
     if (workspaces.length < 2) {
         throw new Error(
             "need at least two keys (one per arm) in MONID_SIM_KEYS",
         );
     }
 
+    if (cfg.degrade === "auto" && cfg.faultMode === "env") {
+        throw new Error("MONID_SIM_FAULT_MODE=env needs MONID_SIM_DEGRADE");
+    }
     const warm = cfg.faultMode === "admin"
         ? await traffic(cfg.warmupEpisodes)
         : undefined;
+    if (warm && cfg.degrade === "auto") {
+        cfg = { ...cfg, degrade: busiest(warm) };
+    }
     if (warm) await freshSnapshot();
     const before = await measure();
     if (cfg.faultMode === "admin") {
@@ -216,7 +229,17 @@ export async function runSim(
     const termAfter = mean(after.treatment.terms);
     const armCount = (a: Arm) => workspaces.filter((w) => w.arm === a).length;
 
+    const shownBefore = (a: Arm) =>
+        before[a].ranks.filter((r) => r <= cfg.limit).length;
     const checks: [boolean, string][] = [
+        [
+            shownBefore("treatment") > 0 && shownBefore("control") > 0,
+            `${cfg.degrade} was in the top ${cfg.limit} before the fault (treatment ${
+                shownBefore("treatment")
+            }/${before.treatment.ranks.length}, control ${
+                shownBefore("control")
+            }/${before.control.ranks.length} queries)`,
+        ],
         [
             armCount("treatment") > 0 && armCount("control") > 0,
             `both arms present (${armCount("treatment")} treatment, ${
@@ -281,7 +304,11 @@ export async function runSim(
         "Scripted agents, fake transport and injected faults. A pass shows the loop",
         "works mechanically; it says nothing about real agents or real providers.",
         "",
-        `host ${cfg.baseUrl}  leaf ${LEAF}  degraded ${cfg.degrade} (error_rate ${cfg.errorRate}, via ${cfg.faultMode})`,
+        `host ${cfg.baseUrl}  leaf ${LEAF}  degraded ${cfg.degrade}${
+            config.degrade === "auto"
+                ? " (auto: most successful warm-up runs)"
+                : ""
+        } (error_rate ${cfg.errorRate}, via ${cfg.faultMode})`,
         `host decay half-life ${
             cfg.halfLifeMs
                 ? `${cfg.halfLifeMs} ms`
@@ -299,6 +326,24 @@ export async function runSim(
         ...checks.map(([ok, msg]) => `${ok ? "PASS" : "FAIL"}  ${msg}`),
     ].join("\n");
     return { passed: checks.every(([ok]) => ok), report };
+}
+
+/** The endpoint with the most successful runs across both arms; ties by id. */
+function busiest(t: Record<Arm, Traffic>): string {
+    const ok = new Map<string, number>();
+    for (const arm of [t.control, t.treatment]) {
+        for (const [id, n] of arm.okBy) ok.set(id, (ok.get(id) ?? 0) + n);
+    }
+    const best =
+        [...ok.entries()].sort((a, b) =>
+            b[1] - a[1] || a[0].localeCompare(b[0])
+        )[0];
+    if (!best) {
+        throw new Error(
+            "no successful warm-up run to pick a degrade target from",
+        );
+    }
+    return best[0];
 }
 
 const fmt = (x: number) => (Number.isFinite(x) ? x.toFixed(2) : "-");

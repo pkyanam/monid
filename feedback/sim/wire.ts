@@ -145,10 +145,11 @@ export class MonidClient {
     }
 
     inspect(provider: string, endpoint: string) {
-        return this.request<unknown>("POST", "/v1/inspect", {
-            provider,
-            endpoint,
-        });
+        return this.request<{ input?: Record<string, unknown> }>(
+            "POST",
+            "/v1/inspect",
+            { provider, endpoint },
+        );
     }
 
     run(

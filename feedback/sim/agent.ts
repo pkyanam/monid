@@ -3,7 +3,7 @@
  * new endpoints, run, retry the next result on failure, and sometimes leave
  * feedback. All randomness comes from the seeded `rand`.
  */
-import { ENDPOINTS } from "./scenario.ts";
+import { buildInput } from "./input.ts";
 import {
     type Arm,
     type DiscoverResult,
@@ -22,6 +22,8 @@ export interface Episode {
     runs: number;
     ok: number;
     feedback: number;
+    /** Endpoint id of the run that succeeded, if one did. */
+    okOn?: string;
 }
 
 export interface AgentOptions {
@@ -77,7 +79,8 @@ export async function episode(
     query: string,
     rand: () => number,
     opts: AgentOptions,
-    inspected: Set<string>,
+    /** Inspect responses' `input` schemas by endpoint id, shared across episodes. */
+    inspected: Map<string, Record<string, unknown> | undefined>,
 ): Promise<Episode> {
     const d = await client.discover(query, opts.limit);
     const ep: Episode = {
@@ -95,11 +98,10 @@ export async function episode(
         const r = d.results[i];
         const id = endpointId(r);
         if (!inspected.has(id)) {
-            await client.inspect(r.provider, r.endpoint);
-            inspected.add(id);
+            const doc = await client.inspect(r.provider, r.endpoint);
+            inspected.set(id, doc.input);
         }
-        const input = ENDPOINTS.find((e) => e.id === id)?.input(query) ??
-            { body: { query } };
+        const input = buildInput(inspected.get(id), query);
         const { runId, outcome } = await run(
             client,
             r,
@@ -108,7 +110,10 @@ export async function episode(
             opts.pollMs,
         );
         ep.runs++;
-        if (outcome === "ok") ep.ok++;
+        if (outcome === "ok") {
+            ep.ok++;
+            ep.okOn = id;
+        }
         if (runId && rand() < FEEDBACK_P[outcome]) {
             const res = await client.feedback({
                 runId,

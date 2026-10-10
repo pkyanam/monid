@@ -1,6 +1,7 @@
 /**
- * The sim scenario: one category leaf, the endpoints in it that have recorded
- * fixtures in this repo, and queries that should land in that leaf.
+ * The sim scenario: the leaf the queries target and the queries. Against a real host the candidates come from its
+ * discover over the whole catalog; ENDPOINTS is only the stub host's fixed
+ * candidate list.
  */
 
 export const LEAF = "news-search";
@@ -10,46 +11,36 @@ export interface ScenarioEndpoint {
     id: string;
     /** Base relevance the stub host uses in place of BM25. */
     stubBaseScore: number;
-    /** Run input for a query, in the CLI's EndpointInput shape. */
-    input: (query: string) => Record<string, unknown>;
+    /** Catalog categories, primary first (a run with no discoverId counts there). */
+    categories: string[];
 }
 
-// All five have fixtures under connectors/<provider>/**/fixtures.
+// News-search endpoints with recorded fixtures under connectors/<provider>/**/fixtures.
 export const ENDPOINTS: ScenarioEndpoint[] = [
-    {
-        id: "opoint#search",
-        stubBaseScore: 10,
-        input: (q) => ({ body: { searchterm: q } }),
-    },
-    {
-        id: "search1api#news",
-        stubBaseScore: 9.4,
-        input: (q) => ({ body: { query: q, max_results: 5 } }),
-    },
+    { id: "opoint#search", stubBaseScore: 10, categories: [LEAF] },
+    { id: "search1api#news", stubBaseScore: 9.4, categories: [LEAF] },
     {
         id: "akta#v1/news",
         stubBaseScore: 9,
-        input: (q) => ({ queryParams: { query: q, limit: 5 } }),
+        categories: ["company-news", LEAF, "funding-data"],
     },
     {
         id: "octen#search",
         stubBaseScore: 8.6,
-        input: (q) => ({ body: { query: q } }),
+        categories: ["web-search", LEAF],
     },
     {
         id: "tinyfish#search",
         stubBaseScore: 8.2,
-        input: (q) => ({ queryParams: { query: q } }),
+        categories: ["web-search", LEAF],
     },
 ];
 
-/** Degraded in phase 2 unless MONID_SIM_DEGRADE says otherwise. It is rank 1 on base score. */
-export const DEFAULT_DEGRADE = "opoint#search";
-
+/** Phrased the way an agent asks for news; each should land in LEAF. */
 export const QUERIES = [
-    "latest news about Canva",
-    "news coverage of the OpenAI funding round",
-    "recent headlines on electric vehicle tariffs",
-    "news articles about Nvidia earnings this week",
-    "what is the press saying about the Boeing strike",
+    "latest news articles about Canva",
+    "news search for electric vehicle tariffs this week",
+    "recent headlines on the Boeing strike",
+    "what is the press saying about Nvidia earnings",
+    "search news coverage of the Fed rate decision",
 ];
