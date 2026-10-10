@@ -7,7 +7,8 @@
         "./shared/testing",
         "./engine",
         "./feedback/rerank",
-        "./feedback/sim"
+        "./feedback/sim",
+        "./host"
     ],
     "tasks": {
         "check": "deno check .",
@@ -28,6 +29,7 @@
         "webhook": "deno run --unstable-kv --allow-read --allow-write --allow-env --allow-net --allow-run=git,cloudflared,tailscale scripts/webhook.ts",
         "apify:scaffold": "deno run --allow-read --allow-write --allow-env --allow-net=api.apify.com scripts/apify-scaffold.ts",
         "engine:estimate": "deno run --allow-read --allow-write --allow-env scripts/estimate.ts",
+        "host:serve": "deno run --allow-read --allow-write --allow-env --allow-net --allow-run=git host/main.ts",
         "drift": "deno run --allow-read --allow-write --allow-env --allow-net=api.apify.com --allow-run=deno,git scripts/drift.ts"
     },
     "imports": {

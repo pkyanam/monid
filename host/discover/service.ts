@@ -1,0 +1,259 @@
+import type { Catalog, CatalogEntry, WirePrice } from "../catalog/catalog.ts";
+import type { EndpointMetrics, HealthTracker } from "../health/tracker.ts";
+import type {
+    Candidate,
+    FeedbackReranker,
+    SnapshotHolder,
+} from "../rerank/port.ts";
+import { type Db, exec } from "../store/db.ts";
+import { type Arm, assignArm, type Clock, HttpError, newId } from "../util.ts";
+import { type Bm25Hit, Bm25Index, normalizeScore } from "./bm25.ts";
+
+/** Wire request — cli/src/api/client.ts `discover()`. */
+export interface DiscoverRequest {
+    query: string;
+    limit?: number;
+    minScore?: number;
+    includeUnavailable?: boolean;
+}
+
+/** Wire result — cli `DiscoverResult` (+ nothing removed). */
+export interface DiscoverResult {
+    provider: string;
+    providerName: string;
+    endpoint: string;
+    description: string;
+    price: WirePrice;
+    score: number;
+    tags: string[];
+    metrics?: EndpointMetrics;
+}
+
+/** cli `DiscoverResponse` + additive `discoverId` / `clusterId`. */
+export interface DiscoverResponse {
+    results: DiscoverResult[];
+    query: string;
+    count: number;
+    discoverId: string;
+    clusterId: string;
+    hints?: Record<string, unknown>;
+}
+
+export interface ImpressionCandidate {
+    endpointId: string;
+    position: number;
+    baseScore: number;
+    finalScore: number;
+    /** Clamped feedback term the reranker applied. */
+    term: number;
+    health: number;
+    flag: number;
+    propensity: number;
+}
+
+/** Health status → the reranker's multiplier (outside the feedback cap). */
+export function healthMultiplier(metrics: EndpointMetrics | undefined): number {
+    switch (metrics?.status) {
+        case "outage":
+            return 0;
+        case "degraded":
+            return 0.6;
+        default:
+            return 1;
+    }
+}
+
+export interface DiscoverDeps {
+    db: Db;
+    catalog: Catalog;
+    health: HealthTracker;
+    reranker: FeedbackReranker;
+    snapshots: SnapshotHolder;
+    clock: Clock;
+    controlPercent: number;
+    experimentSalt: string;
+}
+
+const DEFAULT_LIMIT = 10;
+const MAX_LIMIT = 50;
+const MIN_SHORTLIST = 20;
+const CLUSTER_VOTERS = 10;
+
+export class DiscoverService {
+    private readonly index: Bm25Index;
+
+    constructor(private readonly deps: DiscoverDeps) {
+        const names = deps.catalog.categoryNames;
+        this.index = new Bm25Index(
+            deps.catalog.entries.map((e) => ({
+                id: e.id,
+                fields: [
+                    { text: e.displayName, weight: 3 },
+                    { text: `${e.provider} ${e.providerName}`, weight: 2 },
+                    { text: e.summary, weight: 2 },
+                    {
+                        text: e.categories.map((c) =>
+                            `${c} ${names.get(c) ?? ""}`
+                        ).join(" "),
+                        weight: 2,
+                    },
+                    { text: e.description, weight: 1 },
+                    { text: e.notes.join(" "), weight: 1 },
+                ],
+            })),
+        );
+    }
+
+    /**
+     * Category leaf for the query: score-weighted vote over the top hits'
+     * categories (v1 cluster = category leaf). Ties break by leaf id.
+     */
+    inferCluster(hits: Bm25Hit[]): string {
+        const votes = new Map<string, number>();
+        for (const hit of hits.slice(0, CLUSTER_VOTERS)) {
+            const cats = this.deps.catalog.get(hit.id)?.categories ?? [];
+            for (const cat of cats) {
+                votes.set(cat, (votes.get(cat) ?? 0) + hit.score / cats.length);
+            }
+        }
+        const best =
+            [...votes.entries()].sort((a, b) =>
+                b[1] - a[1] || a[0].localeCompare(b[0])
+            )[0];
+        return best?.[0] ?? "uncategorized";
+    }
+
+    discover(
+        workspaceId: string,
+        req: DiscoverRequest,
+    ): DiscoverResponse {
+        const { catalog, health, clock } = this.deps;
+        const query = typeof req.query === "string" ? req.query.trim() : "";
+        if (!query) {
+            throw new HttpError(400, "INVALID_REQUEST", "query is required");
+        }
+        const limit = Math.min(
+            MAX_LIMIT,
+            Math.max(
+                1,
+                Math.trunc(Number(req.limit ?? DEFAULT_LIMIT)) || DEFAULT_LIMIT,
+            ),
+        );
+        const minScore = typeof req.minScore === "number" ? req.minScore : 0;
+        const now = clock();
+
+        const shortlistSize = Math.max(limit * 2, MIN_SHORTLIST);
+        const hits = this.index.search(query, shortlistSize);
+        const clusterId = this.inferCluster(hits);
+        const arm: Arm = assignArm(
+            workspaceId,
+            this.deps.experimentSalt,
+            this.deps.controlPercent,
+        );
+
+        const candidates: Candidate[] = [];
+        const outage: Candidate[] = [];
+        for (const hit of hits) {
+            if (normalizeScore(hit.score) < minScore) continue;
+            const metrics = health.metrics(hit.id, now);
+            const candidate: Candidate = {
+                endpoint: hit.id,
+                baseScore: hit.score,
+                health: healthMultiplier(metrics),
+            };
+            // outage is filtered server-side unless opted in, then ranked last
+            if (metrics?.status === "outage") outage.push(candidate);
+            else candidates.push(candidate);
+        }
+
+        // includeUnavailable: an outage endpoint that would have made the cut
+        // on relevance alone keeps its slot, shown after everything healthy.
+        let reserved: Candidate[] = [];
+        if (req.includeUnavailable && outage.length > 0) {
+            const cut = [...candidates, ...outage]
+                .map((c) => c.baseScore)
+                .sort((a, b) => b - a)[limit - 1] ?? -Infinity;
+            reserved = outage
+                .filter((c) => c.baseScore >= cut)
+                .sort((a, b) => b.baseScore - a.baseScore)
+                .slice(0, limit);
+        }
+
+        const { version, snapshot } = this.deps.snapshots.get();
+        const reranked = this.deps.reranker(candidates, snapshot, {
+            workspaceId,
+            clusterId,
+            limit: limit - reserved.length,
+            arm,
+        });
+        const shown: ImpressionCandidate[] = reranked.ranked.map((
+            r,
+            position,
+        ) => ({
+            endpointId: r.endpoint,
+            position,
+            baseScore: r.baseScore,
+            finalScore: r.finalScore,
+            term: r.term,
+            health: r.health,
+            flag: r.flag,
+            propensity: reranked.propensities[position] ?? 1,
+        }));
+        for (const c of reserved) {
+            shown.push({
+                endpointId: c.endpoint,
+                position: shown.length,
+                baseScore: c.baseScore,
+                finalScore: 0,
+                term: 0,
+                health: 0,
+                flag: 1,
+                propensity: 1,
+            });
+        }
+
+        const discoverId = newId("dsc", now);
+        exec(
+            this.deps.db,
+            `INSERT INTO discover_impressions
+               (id, workspace_id, query, cluster_id, arm, snapshot_version,
+                exploration_slot, candidates_json, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            discoverId,
+            workspaceId,
+            query,
+            clusterId,
+            arm,
+            version,
+            reranked.explorationSlot?.position ?? null,
+            JSON.stringify(shown),
+            now,
+        );
+
+        const results: DiscoverResult[] = shown.map((r) => {
+            const entry = catalog.get(r.endpointId) as CatalogEntry;
+            const metrics = health.metrics(r.endpointId, now);
+            return {
+                provider: entry.provider,
+                providerName: entry.providerName,
+                endpoint: entry.endpoint,
+                description: entry.summary,
+                price: entry.price,
+                score: normalizeScore(r.baseScore),
+                tags: entry.categories,
+                ...(metrics ? { metrics } : {}),
+            };
+        });
+        return {
+            results,
+            query,
+            count: results.length,
+            discoverId,
+            clusterId,
+            hints: {
+                discoverId:
+                    "Pass discoverId to /v1/run so feedback and retries link to this ranking.",
+            },
+        };
+    }
+}
