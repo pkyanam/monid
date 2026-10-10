@@ -244,7 +244,7 @@ Deno.test("host worker: contract violations and empty results are implicit negat
         const empty = signals(host.db, "empty_result");
         assertEquals(empty.length, 1);
         assertEquals(empty[0].aspect, "quality");
-        assertEquals(empty[0].weight, 0.25);
+        assertEquals(empty[0].weight, 1);
         const cv = signals(host.db, "contract_violation");
         assertEquals(cv.length, 1);
         assertEquals(cv[0].value, 0);

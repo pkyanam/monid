@@ -60,6 +60,7 @@ export interface RunRow {
     created_at: number;
     started_at: number | null;
     completed_at: number | null;
+    fault_injected: number;
 }
 
 export interface RunServiceDeps {
@@ -69,9 +70,12 @@ export interface RunServiceDeps {
     transports: TransportFactory;
     clock: Clock;
     syncWaitMs: number;
+    /** Leave runs with injected faults out of live health (MONID_HEALTH_IGNORE_FAULTS). */
+    healthIgnoreFaults?: boolean;
 }
 
 interface Outcome {
+    faultInjected?: boolean;
     status: RunStatus;
     output?: Json | null;
     error?: { source: "provider" | "platform"; message: string };
@@ -217,11 +221,27 @@ export class RunService {
         input: RunInput,
         signal: AbortSignal,
     ): Promise<Outcome> {
+        const probe: { injected?: () => boolean } = {};
+        const outcome = await this.executeInner(
+            entry,
+            input,
+            signal,
+            (f) => (probe.injected = f),
+        );
+        return { ...outcome, faultInjected: probe.injected?.() ?? false };
+    }
+
+    private async executeInner(
+        entry: CatalogEntry,
+        input: RunInput,
+        signal: AbortSignal,
+        onTransport: (injected: (() => boolean) | undefined) => void,
+    ): Promise<Outcome> {
         try {
             const unit = sealUnit(this.deps.catalog.bundle, entry.id);
-            const { transport, sleep } = await this.deps.transports.forRun(
-                entry.doc,
-            );
+            const { transport, sleep, injected } = await this.deps.transports
+                .forRun(entry.doc);
+            onTransport(injected);
             const engine = new Engine({
                 transport,
                 ...(sleep ? { sleep } : {}),
@@ -289,7 +309,7 @@ export class RunService {
             this.deps.db,
             `UPDATE runs SET status = ?, output_json = ?, error_json = ?, error_code = ?,
                 http_status = ?, is_provider_error = ?, is_empty = ?, provider_total_ms = ?,
-                usage_json = ?, completed_at = ?
+                usage_json = ?, fault_injected = ?, completed_at = ?
              WHERE id = ?`,
             o.status,
             o.output === undefined ? null : JSON.stringify(o.output),
@@ -300,6 +320,7 @@ export class RunService {
             o.isEmpty === undefined ? null : Number(o.isEmpty),
             o.providerTotalMs ?? null,
             o.usage === undefined ? null : JSON.stringify(o.usage),
+            o.faultInjected ? 1 : 0,
             now,
             id,
         );
@@ -314,6 +335,7 @@ export class RunService {
     private recordHealth(row: RunRow): void {
         if (!row.completed_at || row.status === "STOPPED") return;
         if (row.error_code && CALLER_FAULT.has(row.error_code)) return;
+        if (this.deps.healthIgnoreFaults && row.fault_injected) return;
         this.deps.health.record(row.endpoint_id, {
             ts: row.completed_at,
             ok: row.status === "COMPLETED",

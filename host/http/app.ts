@@ -5,6 +5,8 @@ import type { FeedbackService } from "../feedback/service.ts";
 import type { HealthTracker } from "../health/tracker.ts";
 import type { RunService } from "../runs/service.ts";
 import type { SnapshotHolder } from "../rerank/port.ts";
+import type { SnapshotBuilder } from "../rerank/builder.ts";
+import type { FakeProfile } from "../config.ts";
 import type { TransportFactory } from "../transport/factory.ts";
 import { type Clock, errorResponse, HttpError, json } from "../util.ts";
 
@@ -21,6 +23,7 @@ export interface AppDeps {
     feedback: FeedbackService;
     health: HealthTracker;
     snapshots: SnapshotHolder;
+    snapshotBuilder: SnapshotBuilder;
     transports: TransportFactory;
     clock: Clock;
 }
@@ -60,8 +63,11 @@ export function createApp(deps: AppDeps): (req: Request) => Promise<Response> {
         );
     };
 
+    /** Admin = MONID_ADMIN_KEY as `Authorization: Bearer` (sim) or `x-admin-key`. */
     const admin = (req: Request) => {
-        const key = req.headers.get("x-admin-key");
+        const header = req.headers.get("authorization") ?? "";
+        const key = req.headers.get("x-admin-key") ??
+            (header.startsWith("Bearer ") ? header.slice(7).trim() : "");
         if (!config.adminKey || key !== config.adminKey) {
             throw new HttpError(403, "FORBIDDEN", "admin key required");
         }
@@ -111,13 +117,81 @@ export function createApp(deps: AppDeps): (req: Request) => Promise<Response> {
                 }
             }
 
+            if (path === "/v1/admin/faults") {
+                admin(req);
+                if (!deps.transports.setProfiles) {
+                    throw new HttpError(
+                        409,
+                        "CONFLICT",
+                        "faults need MONID_HOST_TRANSPORT=fake or fixture",
+                    );
+                }
+                if (method === "POST") {
+                    const b = await body(req);
+                    const target = String(b.target ?? "");
+                    if (
+                        !target ||
+                        !catalog.get(target) &&
+                            !catalog.entries.some((e) => e.provider === target)
+                    ) {
+                        throw new HttpError(
+                            404,
+                            "NOT_FOUND",
+                            `unknown fault target ${target}`,
+                        );
+                    }
+                    const rate = (v: unknown, name: string) => {
+                        if (v === undefined) return undefined;
+                        if (typeof v !== "number" || !(v >= 0 && v <= 1)) {
+                            throw new HttpError(
+                                400,
+                                "INVALID_REQUEST",
+                                `${name} must be in [0, 1]`,
+                            );
+                        }
+                        return v;
+                    };
+                    const errorRate = rate(b.error_rate, "error_rate");
+                    const emptyRate = rate(b.empty_rate, "empty_rate");
+                    const garbageRate = rate(b.garbage_rate, "garbage_rate");
+                    const profiles = { ...deps.transports.profiles?.() };
+                    const next: FakeProfile = {
+                        ...profiles[target],
+                        ...(errorRate !== undefined ? { errorRate } : {}),
+                        ...(emptyRate !== undefined ? { emptyRate } : {}),
+                        ...(garbageRate !== undefined ? { garbageRate } : {}),
+                    };
+                    if (Object.values(next).every((v) => !v)) {
+                        delete profiles[target];
+                    } else profiles[target] = next;
+                    deps.transports.setProfiles(profiles);
+                    return json({ faults: deps.transports.profiles?.() ?? {} });
+                }
+                if (method === "GET") {
+                    return json({ faults: deps.transports.profiles?.() ?? {} });
+                }
+            }
+            if (method === "POST" && path === "/v1/admin/snapshot") {
+                admin(req);
+                await req.body?.cancel();
+                const stats = deps.snapshotBuilder.build();
+                return json({ snapshotVersion: stats.version, ...stats });
+            }
+
             const caller = auth(req);
 
             // ---- discover / inspect / run -----------------------------------
             if (method === "POST" && path === "/v1/discover") {
                 const b = await body(req);
+                const forced = config.honorArmHeader
+                    ? req.headers.get("x-monid-arm")?.trim().toLowerCase()
+                    : undefined;
                 return json(
-                    deps.discover.discover(caller.workspaceId, b as never),
+                    deps.discover.discover(caller.workspaceId, b as never, {
+                        ...(forced === "control" || forced === "treatment"
+                            ? { arm: forced }
+                            : {}),
+                    }),
                 );
             }
             if (method === "POST" && path === "/v1/inspect") {

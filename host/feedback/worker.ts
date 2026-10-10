@@ -4,7 +4,12 @@ import { allRows, type Db, exec, getRow, tx } from "../store/db.ts";
 import type { Clock } from "../util.ts";
 import { addSignal } from "./aggregates.ts";
 import { classify } from "./classify.ts";
-import { DEFAULT_TRUST, SEVERE_FLAG, SIGNAL_WEIGHTS } from "./weights.ts";
+import {
+    DEFAULT_TRUST,
+    type HalfLives,
+    SEVERE_FLAG,
+    SIGNAL_WEIGHTS,
+} from "./weights.ts";
 
 /**
  * The background half of the loop. One `tick()`:
@@ -25,6 +30,13 @@ export interface WorkerDeps {
     retryWindowMs: number;
     retentionDays: number;
     trust: Record<string, number>;
+    halfLives?: HalfLives;
+    /**
+     * Severe flags act on BOTH arms (like health), so in test mode they must
+     * not fire on runs whose failure a fault profile injected
+     * (MONID_HEALTH_IGNORE_FAULTS). The explicit signal is still written.
+     */
+    flagsIgnoreFaults?: boolean;
     batchSize?: number;
 }
 
@@ -152,13 +164,19 @@ export class FeedbackWorker {
                     workspaceId: row.workspace_id,
                     runId: row.run_id,
                     feedbackId: row.id,
-                });
+                }, this.deps.halfLives);
             }
         }
         const negative = extraction.value !== null && extraction.value < 0.5;
+        const injected = this.deps.flagsIgnoreFaults && row.run_id !== null &&
+            getRow<{ f: number }>(
+                    db,
+                    `SELECT fault_injected AS f FROM runs WHERE id = ?`,
+                    row.run_id,
+                )?.f === 1;
         if (
             row.priority > 0 && scored && negative &&
-            extraction.aspects.length > 0
+            extraction.aspects.length > 0 && !injected
         ) {
             this.raiseFlag(row, now);
             stats.severe++;
@@ -272,7 +290,7 @@ export class FeedbackWorker {
             aspect: "reliability",
             value: ok ? 1 : 0,
             weight: SIGNAL_WEIGHTS.runOutcome,
-        });
+        }, this.deps.halfLives);
         if (run.error_code && CONTRACT_CODES.has(run.error_code)) {
             addSignal(this.deps.db, {
                 ...base,
@@ -281,7 +299,7 @@ export class FeedbackWorker {
                 aspect: "quality",
                 value: 0,
                 weight: SIGNAL_WEIGHTS.contractViolation,
-            });
+            }, this.deps.halfLives);
         }
         if (ok && run.is_empty === 1) {
             addSignal(this.deps.db, {
@@ -291,7 +309,7 @@ export class FeedbackWorker {
                 aspect: "quality",
                 value: 0,
                 weight: SIGNAL_WEIGHTS.emptyResult,
-            });
+            }, this.deps.halfLives);
         }
     }
 
@@ -368,7 +386,7 @@ export class FeedbackWorker {
                 value: 0,
                 weight: SIGNAL_WEIGHTS.retryElsewhere,
                 ts: run.completed_at!,
-            });
+            }, this.deps.halfLives);
         } else if (!failedOrEmpty) {
             const bucket = Math.floor(run.completed_at! / retryWindowMs);
             addSignal(db, {
@@ -379,7 +397,7 @@ export class FeedbackWorker {
                 value: 1,
                 weight: SIGNAL_WEIGHTS.successNoRetry,
                 ts: windowEnd,
-            });
+            }, this.deps.halfLives);
         }
     }
 

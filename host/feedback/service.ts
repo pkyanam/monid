@@ -1,3 +1,4 @@
+import type { HalfLives } from "./weights.ts";
 import { type Db, exec, getRow, tx } from "../store/db.ts";
 import { type Clock, HttpError, newId } from "../util.ts";
 import { rebuildAggregates } from "./aggregates.ts";
@@ -37,6 +38,7 @@ export interface FeedbackServiceDeps {
     ) => string | undefined;
     clock: Clock;
     ratePerMinute: number;
+    halfLives?: HalfLives;
 }
 
 export class FeedbackService {
@@ -218,7 +220,9 @@ export class FeedbackService {
                 `DELETE FROM signals WHERE workspace_id = ? AND source = 'explicit'`,
                 workspaceId,
             );
-            if (sig.changes > 0) rebuildAggregates(this.deps.db);
+            if (sig.changes > 0) {
+                rebuildAggregates(this.deps.db, this.deps.halfLives);
+            }
             return { deleted: changes };
         });
     }

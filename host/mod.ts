@@ -12,6 +12,7 @@ import {
     SnapshotHolder,
 } from "./rerank/port.ts";
 import { RunService } from "./runs/service.ts";
+import { SnapshotBuilder } from "./rerank/builder.ts";
 import { type Db, openDb } from "./store/db.ts";
 import {
     createTransportFactory,
@@ -22,6 +23,7 @@ import { type Clock, systemClock } from "./util.ts";
 export { loadConfigFromEnv, testConfig } from "./config.ts";
 export type { HostConfig } from "./config.ts";
 export { loadBundle } from "./catalog/load.ts";
+export { SnapshotBuilder } from "./rerank/builder.ts";
 export {
     readAggregates,
     readEvidence,
@@ -35,6 +37,7 @@ export interface Host {
     catalog: Catalog;
     health: HealthTracker;
     snapshots: SnapshotHolder;
+    snapshotBuilder: SnapshotBuilder;
     transports: TransportFactory;
     discover: DiscoverService;
     runs: RunService;
@@ -71,6 +74,7 @@ export function createHost(opts: {
         clock,
         controlPercent: config.controlPercent,
         experimentSalt: config.experimentSalt,
+        allow: config.discoverAllow,
     });
     const runs = new RunService({
         db,
@@ -79,12 +83,14 @@ export function createHost(opts: {
         transports,
         clock,
         syncWaitMs: config.syncWaitMs,
+        healthIgnoreFaults: config.healthIgnoreFaults,
     });
     runs.hydrateHealth(clock() - 24 * 60 * 60_000);
     const feedback = new FeedbackService({
         db,
         clock,
         ratePerMinute: config.feedbackRatePerMinute,
+        halfLives: config.halfLives,
         resolveEndpoint: (endpoint, provider) =>
             (provider
                 ? catalog.resolve(provider, endpoint)
@@ -97,8 +103,17 @@ export function createHost(opts: {
         retryWindowMs: config.retryWindowMs,
         retentionDays: config.feedbackRetentionDays,
         trust: config.trust,
+        halfLives: config.halfLives,
+        flagsIgnoreFaults: config.healthIgnoreFaults,
+    });
+    const snapshotBuilder = new SnapshotBuilder({
+        db,
+        clock,
+        holder: snapshots,
+        options: config.snapshotOptions,
     });
     const handle = createApp({
+        snapshotBuilder,
         config,
         catalog,
         discover,
@@ -115,6 +130,7 @@ export function createHost(opts: {
         catalog,
         health,
         snapshots,
+        snapshotBuilder,
         transports,
         discover,
         runs,

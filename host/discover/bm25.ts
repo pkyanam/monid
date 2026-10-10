@@ -7,9 +7,56 @@
 const STOPWORDS = new Set(
     ("a an and are as at be by for from get i in into is it its me my of on " +
         "or that the their this to via was what when where which who will " +
-        "with you your find search lookup look up data api endpoint tool")
+        "with you your find lookup look up data api endpoint tool " +
+        // recency / chatter words: every live endpoint is "latest", so they
+        // only add noise when matched against descriptions
+        "about latest recent recently current currently new newest today " +
+        "week weeks month this these those saying say said tell show give " +
+        "please some any all")
         .split(" "),
 );
+
+/**
+ * Query-side synonyms (one-way, applied to the query only): words agents
+ * use for an intent that endpoint docs phrase differently.
+ */
+const QUERY_SYNONYMS: Record<string, string[]> = {
+    press: ["news"],
+    headline: ["news"],
+    headlines: ["news"],
+    article: ["news"],
+    articles: ["news"],
+    coverage: ["news"],
+    media: ["news"],
+    journalist: ["news"],
+    stories: ["news"],
+    story: ["news"],
+    google: ["serp"],
+    forecast: ["weather"],
+};
+
+let stemmedCache: Map<string, string[]> | undefined;
+/** Synonym keys/values run through the same stemmer as the index (lazy: NO_STEM is declared below). */
+function stemmedSynonyms(): Map<string, string[]> {
+    return stemmedCache ??= new Map(
+        Object.entries(QUERY_SYNONYMS).map((
+            [k, v],
+        ) => [stem(k), v.map(stem)]),
+    );
+}
+
+/** Tokenize a query and append its synonyms (each once). */
+export function tokenizeQuery(text: string): string[] {
+    const out = tokenize(text);
+    const extra = new Set<string>();
+    const synonyms = stemmedSynonyms();
+    for (const t of out) {
+        for (const syn of synonyms.get(t) ?? []) {
+            if (!out.includes(syn)) extra.add(syn);
+        }
+    }
+    return [...out, ...extra];
+}
 
 /** Lowercase, split on non-alphanumerics, drop stopwords, light stemming. */
 export function tokenize(text: string): string[] {
@@ -21,7 +68,21 @@ export function tokenize(text: string): string[] {
     return out;
 }
 
+/** Words the suffix rules would mangle into something else ("news" ≠ "new"). */
+const NO_STEM = new Set([
+    "news",
+    "series",
+    "species",
+    "status",
+    "census",
+    "analysis",
+    "gas",
+    "bus",
+    "yes",
+]);
+
 function stem(word: string): string {
+    if (NO_STEM.has(word)) return word;
     if (word.length > 5 && word.endsWith("ies")) return word.slice(0, -3) + "y";
     if (word.length > 5 && word.endsWith("ing")) return word.slice(0, -3);
     if (word.length > 4 && word.endsWith("ed")) return word.slice(0, -2);
@@ -81,7 +142,7 @@ export class Bm25Index {
     }
 
     search(query: string, limit: number): Bm25Hit[] {
-        const terms = [...new Set(tokenize(query))];
+        const terms = [...new Set(tokenizeQuery(query))];
         const scores = new Map<number, number>();
         const n = this.ids.length;
         for (const term of terms) {

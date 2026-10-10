@@ -14,7 +14,8 @@ import { sharedBundle } from "./helpers.ts";
 Deno.test("host bm25: tokenize drops stopwords and stems plurals", () => {
     const t = tokenize("Search the Web for Companies");
     assert(!t.includes("the"));
-    assert(!t.includes("search")); // generic catalog word, a stopword here
+    assert(t.includes("search"));
+    assert(t.includes("news") || tokenize("news").includes("news")); // "news" is not stemmed to "new"
     assert(t.includes("web"));
     assert(t.some((w) => w.startsWith("compan")));
 });

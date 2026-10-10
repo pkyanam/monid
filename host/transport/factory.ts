@@ -25,6 +25,8 @@ export interface RunTransport {
     transport: Transport;
     /** Fast-forward lifecycle poll sleeps (replay has no real vendor). */
     sleep?: (ms: number) => Promise<void>;
+    /** True once a fake profile injected a fault into THIS run (error, empty, junk). */
+    injected?: () => boolean;
 }
 
 export interface TransportFactory {
@@ -110,6 +112,7 @@ export function chaosFetch(
     profile: FakeProfile | undefined,
     rng: () => number,
     sleep: (ms: number) => Promise<void>,
+    onInject: () => void = () => {},
 ): typeof fetch {
     if (!profile) return inner;
     return async (input, init) => {
@@ -117,6 +120,7 @@ export function chaosFetch(
             (profile.jitterMs ? (rng() * 2 - 1) * profile.jitterMs : 0);
         if (latency > 0) await sleep(latency);
         if (rng() < (profile.errorRate ?? 0)) {
+            onInject();
             return new Response(
                 JSON.stringify({
                     error: "fake transport: injected upstream failure",
@@ -128,6 +132,7 @@ export function chaosFetch(
             );
         }
         if (rng() < (profile.garbageRate ?? 0)) {
+            onInject();
             // a 200 that isn't the documented shape (an error page wrapped
             // in JSON) — the engine's output-schema check turns it into
             // CONTRACT_VIOLATION wherever the doc declares output.schema
@@ -141,6 +146,7 @@ export function chaosFetch(
         }
         const response = await inner(input, init);
         if (rng() < (profile.emptyRate ?? 0) && response.status < 300) {
+            onInject();
             const body = await response.json().catch(() => null);
             return new Response(JSON.stringify(emptyArrays(body)), {
                 status: response.status,
@@ -172,21 +178,21 @@ export function createTransportFactory(opts: {
     return {
         async forRun(doc) {
             const base = fixtureFetch(await index.choose(doc));
-            const profile = opts.mode === "fake"
-                ? profiles[doc.id] ?? profiles[doc.provider]
-                : undefined;
+            const profile = profiles[doc.id] ?? profiles[doc.provider];
+            let injected = false;
             return {
                 transport: directTransport({
                     params: testParams(doc),
-                    fetch: chaosFetch(base, profile, rng, latencySleep),
+                    fetch: chaosFetch(base, profile, rng, latencySleep, () => {
+                        injected = true;
+                    }),
                 }),
                 sleep: fastSleep,
+                injected: () => injected,
             };
         },
+        // fixture and fake share one path; "fake" just says faults are expected
         setProfiles(next) {
-            if (opts.mode !== "fake") {
-                throw new Error("profiles need MONID_HOST_TRANSPORT=fake");
-            }
             profiles = { ...next };
         },
         profiles: () => ({ ...profiles }),

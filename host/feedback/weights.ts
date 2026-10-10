@@ -13,8 +13,8 @@ export const SIGNAL_WEIGHTS = {
     runOutcome: 1.0,
     /** engine CONTRACT_VIOLATION / FN_CONTRACT / DECODE_FAILED: quality −1 */
     contractViolation: 1.0,
-    /** 2xx but nothing in it: quality −0.25 */
-    emptyResult: 0.25,
+    /** 2xx but nothing in it: quality −1 (reliability still +1: it answered) */
+    emptyResult: 1.0,
     /** caller re-ran elsewhere in the window (qualifying cases only): quality −0.5 */
     retryElsewhere: 0.5,
     /** 2xx, non-empty, no retry in the window: quality +0.05, once per window */
@@ -26,11 +26,20 @@ export const SIGNAL_WEIGHTS = {
 /** Default per-workspace trust; config may pin others (MONID_HOST_TRUST). */
 export const DEFAULT_TRUST = 1.0;
 
-/** Decay half-lives the aggregates carry (the scorer decays to "now"). */
-export const HALF_LIFE_MS = {
+export interface HalfLives {
+    implicit: number;
+    explicit: number;
+}
+
+/**
+ * Decay half-lives for direct library use and tests (3 d implicit, 14 d
+ * explicit, per DESIGN). The served host takes MONID_DECAY_HALF_LIFE_MS
+ * instead, where unset/0 = no decay (sim README contract).
+ */
+export const HALF_LIFE_MS: HalfLives = {
     implicit: 3 * 24 * 60 * 60_000,
     explicit: 14 * 24 * 60 * 60_000,
-} as const;
+};
 
 /** Severe fast lane (v1: flags sit OUTSIDE the ±15% feedback cap). */
 export const SEVERE_FLAG = {

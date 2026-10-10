@@ -1,5 +1,5 @@
 import { allRows, type Db, exec, getRow } from "../store/db.ts";
-import { HALF_LIFE_MS } from "./weights.ts";
+import { HALF_LIFE_MS, type HalfLives } from "./weights.ts";
 
 /**
  * Signals → decayed Beta evidence per (endpoint, cluster, aspect, source) —
@@ -25,12 +25,18 @@ export interface Signal {
     feedbackId?: string | null;
 }
 
+/** 0.5^(age/halfLife); a half-life of 0 (or less) means no decay. */
 export function decay(ageMs: number, halfLifeMs: number): number {
-    return ageMs <= 0 ? 1 : Math.pow(0.5, ageMs / halfLifeMs);
+    if (!(halfLifeMs > 0) || ageMs <= 0) return 1;
+    return Math.pow(0.5, ageMs / halfLifeMs);
 }
 
 /** Insert if new and fold into the aggregate. Returns true when inserted. */
-export function addSignal(db: Db, s: Signal): boolean {
+export function addSignal(
+    db: Db,
+    s: Signal,
+    halfLives: HalfLives = HALF_LIFE_MS,
+): boolean {
     const inserted = exec(
         db,
         `INSERT OR IGNORE INTO signals
@@ -50,7 +56,7 @@ export function addSignal(db: Db, s: Signal): boolean {
         s.runId ?? null,
         s.feedbackId ?? null,
     ).changes === 1;
-    if (inserted) fold(db, s);
+    if (inserted) fold(db, s, halfLives);
     return inserted;
 }
 
@@ -66,8 +72,9 @@ function fold(
         | "weight"
         | "ts"
     >,
+    halfLives: HalfLives,
 ): void {
-    const halfLife = HALF_LIFE_MS[s.source];
+    const halfLife = halfLives[s.source];
     const row = getRow<{ pos: number; neg: number; n: number; as_of: number }>(
         db,
         `SELECT pos, neg, n, as_of FROM signal_aggregates
@@ -112,7 +119,10 @@ function fold(
 }
 
 /** Full rebuild from `signals` (after a workspace deletion). */
-export function rebuildAggregates(db: Db): void {
+export function rebuildAggregates(
+    db: Db,
+    halfLives: HalfLives = HALF_LIFE_MS,
+): void {
     exec(db, `DELETE FROM signal_aggregates`);
     const rows = allRows<{
         endpoint_id: string;
@@ -135,7 +145,7 @@ export function rebuildAggregates(db: Db): void {
             value: r.value,
             weight: r.weight,
             ts: r.ts,
-        });
+        }, halfLives);
     }
 }
 

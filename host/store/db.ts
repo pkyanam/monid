@@ -43,7 +43,9 @@ CREATE TABLE IF NOT EXISTS runs (
     started_at        INTEGER,
     completed_at      INTEGER,
     signals_at        INTEGER,
-    window_closed_at  INTEGER
+    window_closed_at  INTEGER,
+    -- 1 when a fake/fixture fault profile tampered with this run (test mode)
+    fault_injected    INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS runs_ws_created ON runs (workspace_id, created_at);
 CREATE INDEX IF NOT EXISTS runs_endpoint_completed ON runs (endpoint_id, completed_at);
@@ -143,7 +145,7 @@ CREATE TABLE IF NOT EXISTS endpoint_flags (
     PRIMARY KEY (endpoint_id, cluster_id, kind)
 );
 
--- Written by the scorer (feedback/rerank, M3); the host polls MAX(version).
+-- Published by host/rerank/builder.ts (M3): the exact snapshot each version ranked with.
 CREATE TABLE IF NOT EXISTS snapshots (
     version   INTEGER PRIMARY KEY,
     built_at  INTEGER NOT NULL,

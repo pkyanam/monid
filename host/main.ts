@@ -26,17 +26,38 @@ const timer = setInterval(() => {
     }
 }, config.workerIntervalMs);
 
+// M3: publish a scorer snapshot now, then every MONID_SNAPSHOT_INTERVAL_MS
+const logBuild = (why: string) => {
+    try {
+        const s = host.snapshotBuilder.build();
+        console.error(
+            `[monid-host] snapshot v${s.version} (${why}): ${s.rows} evidence rows, ${s.flags} flags, ${s.ms}ms`,
+        );
+    } catch (error) {
+        console.error("[monid-host] snapshot build failed", error);
+    }
+};
+logBuild("boot");
+const snapshotTimer = setInterval(
+    () => logBuild("timer"),
+    config.snapshotIntervalMs,
+);
+
 const server = Deno.serve({
     port: config.port,
     onListen: ({ hostname, port }) =>
         console.error(
             `[monid-host] listening on http://${hostname}:${port} — ${host.catalog.entries.length} endpoints, ` +
-                `transport=${config.transport}, db=${config.dbPath}`,
+                `transport=${config.transport}, db=${config.dbPath}, snapshot every ${config.snapshotIntervalMs}ms` +
+                (config.healthIgnoreFaults
+                    ? ", health ignores injected faults"
+                    : ""),
         ),
 }, host.handle);
 
 const shutdown = async () => {
     clearInterval(timer);
+    clearInterval(snapshotTimer);
     await server.shutdown();
     await host.close();
     Deno.exit(0);

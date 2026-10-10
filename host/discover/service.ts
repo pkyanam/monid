@@ -1,3 +1,4 @@
+import { lookup } from "@monid/feedback-rerank";
 import type { Catalog, CatalogEntry, WirePrice } from "../catalog/catalog.ts";
 import type { EndpointMetrics, HealthTracker } from "../health/tracker.ts";
 import type {
@@ -26,6 +27,8 @@ export interface DiscoverResult {
     price: WirePrice;
     score: number;
     tags: string[];
+    /** Additive: the clamped feedback term applied (0 in control) and the decayed evidence behind it. */
+    quality: { term: number; n?: number };
     metrics?: EndpointMetrics;
 }
 
@@ -36,6 +39,10 @@ export interface DiscoverResponse {
     count: number;
     discoverId: string;
     clusterId: string;
+    /** Experiment arm this workspace is in (additive). */
+    arm: Arm;
+    /** Scorer snapshot the ranking used; 0 = none published yet (additive). */
+    snapshotVersion: number;
     hints?: Record<string, unknown>;
 }
 
@@ -72,6 +79,11 @@ export interface DiscoverDeps {
     clock: Clock;
     controlPercent: number;
     experimentSalt: string;
+    /**
+     * Test mode: index only these endpoint ids or provider slugs (e.g. the
+     * sim's fixture-backed scenario). Inspect/run still see the whole catalog.
+     */
+    allow?: string[];
 }
 
 const DEFAULT_LIMIT = 10;
@@ -85,7 +97,10 @@ export class DiscoverService {
     constructor(private readonly deps: DiscoverDeps) {
         const names = deps.catalog.categoryNames;
         this.index = new Bm25Index(
-            deps.catalog.entries.map((e) => ({
+            deps.catalog.entries.filter((e) =>
+                !deps.allow?.length || deps.allow.includes(e.id) ||
+                deps.allow.includes(e.provider)
+            ).map((e) => ({
                 id: e.id,
                 fields: [
                     { text: e.displayName, weight: 3 },
@@ -126,6 +141,7 @@ export class DiscoverService {
     discover(
         workspaceId: string,
         req: DiscoverRequest,
+        opts: { arm?: Arm } = {},
     ): DiscoverResponse {
         const { catalog, health, clock } = this.deps;
         const query = typeof req.query === "string" ? req.query.trim() : "";
@@ -145,7 +161,7 @@ export class DiscoverService {
         const shortlistSize = Math.max(limit * 2, MIN_SHORTLIST);
         const hits = this.index.search(query, shortlistSize);
         const clusterId = this.inferCluster(hits);
-        const arm: Arm = assignArm(
+        const arm: Arm = opts.arm ?? assignArm(
             workspaceId,
             this.deps.experimentSalt,
             this.deps.controlPercent,
@@ -231,6 +247,15 @@ export class DiscoverService {
         );
 
         const results: DiscoverResult[] = shown.map((r) => {
+            // n = decayed reliability trials behind the cell (alpha+beta minus
+            // the prior's k pseudo-counts), as in the sim's stub host
+            const cell = snapshot
+                ? lookup(snapshot, r.endpointId, clusterId).cell
+                : undefined;
+            const n = cell && snapshot
+                ? cell.reliability.alpha + cell.reliability.beta -
+                    snapshot.params.k
+                : 0;
             const entry = catalog.get(r.endpointId) as CatalogEntry;
             const metrics = health.metrics(r.endpointId, now);
             return {
@@ -239,8 +264,12 @@ export class DiscoverService {
                 endpoint: entry.endpoint,
                 description: entry.summary,
                 price: entry.price,
-                score: normalizeScore(r.baseScore),
+                // the score the list is ordered by (relevance × health ×
+                // flag × bounded feedback term in treatment)
+                score: normalizeScore(r.finalScore),
                 tags: entry.categories,
+                // the clamped feedback term actually applied (0 in control)
+                quality: { term: r.term, n: Math.round(n * 10) / 10 },
                 ...(metrics ? { metrics } : {}),
             };
         });
@@ -250,6 +279,8 @@ export class DiscoverService {
             count: results.length,
             discoverId,
             clusterId,
+            arm,
+            snapshotVersion: version,
             hints: {
                 discoverId:
                     "Pass discoverId to /v1/run so feedback and retries link to this ranking.",
