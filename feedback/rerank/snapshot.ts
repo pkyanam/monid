@@ -88,7 +88,7 @@ export function buildSnapshot(
     opts: BuildOptions,
 ): Snapshot {
     const k = opts.k ?? 10;
-    const raw = { reliability: 0.5, quality: 0.5, ...opts.weights };
+    const raw = { reliability: 0.7, quality: 0.3, ...opts.weights };
     const total = raw.reliability + raw.quality;
     if (!(k > 0 && raw.reliability >= 0 && raw.quality >= 0 && total > 0)) {
         throw new RangeError("k and aspect weights must be positive");

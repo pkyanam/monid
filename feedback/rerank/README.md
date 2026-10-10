@@ -35,10 +35,10 @@ counts don't work here because implicit evidence is lopsided (a clean success
 adds 0.05, a failure adds 1): one failing endpoint became its cluster's norm,
 and its own term came out near zero. The M4 sim found this.
 
-Each cell stores `lower`, the weighted (default 0.5/0.5) sum of each aspect's
-**10th percentile**, and `width`, the weighted 10-90% interval width. The Beta
-quantile is computed in `beta.ts` (Halley iteration on the regularized
-incomplete beta); tests check it against scipy.
+Each cell stores `lower`, the weighted (default reliability 0.7, quality 0.3)
+sum of each aspect's **10th percentile**, and `width`, the weighted 10-90%
+interval width. The Beta quantile is computed in `beta.ts` (Halley iteration on
+the regularized incomplete beta); tests check it against scipy.
 
 ```
 term  = clamp(gain * (cell.lower - clusterPrior.lower), -0.15, +0.15)   gain = 0.5
@@ -74,6 +74,32 @@ P(e, i) = (1 - eps) * [exploit[i] = e] + eps * [explore[i] = e]
 So positions above the last are 1, and the last slot is `1 - eps` for the
 exploit pick and `eps` for the explore pick. `policy()` returns both branches
 for logging.
+
+## Tuning
+
+Weights are reliability 0.7 and quality 0.3. Failures count against reliability
+only; counting them against quality too would count the same evidence twice.
+
+The gain is checked by `tuning_test.ts`. The test cluster is a dense news-search
+cluster with 5 endpoints and 200 runs each (the sim's dense endpoints saw
+roughly 180-255). It uses implicit signals only, weighted like the sim: failure
+1, clean success 0.05. Each cell is the feedback term:
+
+| gain | (a) 60% failures | (b) 10% failures | (c) healthy  |
+| ---- | ---------------- | ---------------- | ------------ |
+| 0.5  | -0.116           | -0.034           | +0.102       |
+| 0.75 | -0.150 (cap)     | -0.051           | +0.150 (cap) |
+| 1.0  | -0.150 (cap)     | -0.067           | +0.150 (cap) |
+
+Rule: take the lowest gain where (a) is in [-0.15, -0.10], (b) >= -0.03, and (c)
+< 0.15. **No gain in the set meets all three**, so the default stays at 0.5, the
+closest option: (a) and (c) hold, and (b) misses by 0.004.
+
+(b) can't be fixed with gain. With successes worth 0.05, an endpoint failing 10%
+of the time has a reliability mean of about 0.31 (0.045 / 0.145), and more
+traffic only pushes its lower bound down. At gain 0.5 it passes up to about 150
+runs per endpoint and fails beyond that. Fixing it means changing the signal
+weights (the 0.05 success weight), not the gain.
 
 ## Caveat
 
