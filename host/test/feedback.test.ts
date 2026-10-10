@@ -446,6 +446,47 @@ Deno.test("host feedback: DELETE removes the workspace's feedback and its rankin
     }
 });
 
+Deno.test("host feedback: DELETE withdraws the workspace's severe-flag reports", async () => {
+    const host = await makeHost();
+    try {
+        const a = await runSearch(host, {}, ALPHA);
+        const b = await runSearch(host, {}, BETA);
+        const severe = {
+            rating: -2,
+            severity: "critical",
+            aspects: ["reliability"],
+            text: "useless",
+        };
+        await call(host, "POST", "/v1/feedback", {
+            ...severe,
+            runId: a.body.runId,
+        }, { key: ALPHA });
+        await call(host, "POST", "/v1/feedback", {
+            ...severe,
+            runId: b.body.runId,
+        }, { key: BETA });
+        host.worker.fastLane();
+        assertEquals(readFlags(host.db, host.clock()), {
+            "tinyfish#search": 0.2,
+        });
+
+        // one reporter left → back to provisional
+        await call(host, "DELETE", "/v1/feedback", undefined, { key: BETA });
+        assertEquals(readFlags(host.db, host.clock()), {
+            "tinyfish#search": 0.5,
+        });
+        // no reporters left → flag gone
+        await call(host, "DELETE", "/v1/feedback", undefined, { key: ALPHA });
+        assertEquals(readFlags(host.db, host.clock()), {});
+        assertEquals(
+            allRows(host.db, `SELECT * FROM endpoint_flags`).length,
+            0,
+        );
+    } finally {
+        await host.close();
+    }
+});
+
 Deno.test("host worker: free text is redacted after the retention period", async () => {
     const host = await makeHost();
     try {

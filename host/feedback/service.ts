@@ -1,10 +1,10 @@
 import type { HalfLives } from "./weights.ts";
-import { type Db, exec, getRow, tx } from "../store/db.ts";
+import { allRows, type Db, exec, getRow, tx } from "../store/db.ts";
 import { type Clock, HttpError, newId } from "../util.ts";
 import { rebuildAggregates } from "./aggregates.ts";
 import { AGENT_ASPECTS, SEVERITIES } from "./classify.ts";
 import { RateLimiter } from "./ratelimit.ts";
-import { FEEDBACK_PRIORITY } from "./weights.ts";
+import { FEEDBACK_PRIORITY, SEVERE_FLAG } from "./weights.ts";
 
 /**
  * POST /v1/feedback — the WRITE path. Validate, resolve the run (it must be
@@ -207,7 +207,11 @@ export class FeedbackService {
         };
     }
 
-    /** DELETE /v1/feedback — every feedback row of the workspace + its explicit signals. */
+    private dropFromFlags(workspaceId: string): void {
+        dropWorkspaceFromFlags(this.deps.db, workspaceId, this.deps.clock());
+    }
+
+    /** DELETE /v1/feedback — every feedback row of the workspace, its explicit signals, and its severe-flag reports. */
     deleteWorkspace(workspaceId: string): { deleted: number } {
         return tx(this.deps.db, () => {
             const { changes } = exec(
@@ -223,8 +227,65 @@ export class FeedbackService {
             if (sig.changes > 0) {
                 rebuildAggregates(this.deps.db, this.deps.halfLives);
             }
+            this.dropFromFlags(workspaceId);
             return { deleted: changes };
         });
+    }
+}
+
+/**
+ * Severe flags remember which workspaces reported them. A deleted workspace
+ * leaves every flag: a flag nobody else reported is removed; a confirmed flag
+ * that no longer has enough distinct reporters drops back to provisional
+ * (live-failure corroboration is re-checked on the next report).
+ */
+function dropWorkspaceFromFlags(db: Db, workspaceId: string, now: number) {
+    const rows = allRows<{
+        endpoint_id: string;
+        cluster_id: string;
+        kind: string;
+        state: string;
+        workspaces_json: string;
+        expires_at: number;
+    }>(
+        db,
+        `SELECT endpoint_id, cluster_id, kind, state, workspaces_json, expires_at
+         FROM endpoint_flags WHERE kind = 'severe_report'`,
+    );
+    for (const r of rows) {
+        const ws: string[] = JSON.parse(r.workspaces_json);
+        if (!ws.includes(workspaceId)) continue;
+        const left = ws.filter((w) => w !== workspaceId);
+        const key = [r.endpoint_id, r.cluster_id, r.kind] as const;
+        if (left.length === 0) {
+            exec(
+                db,
+                `DELETE FROM endpoint_flags WHERE endpoint_id = ? AND cluster_id = ? AND kind = ?`,
+                ...key,
+            );
+            continue;
+        }
+        const demote = r.state === "confirmed" &&
+            left.length < SEVERE_FLAG.confirmWorkspaces;
+        exec(
+            db,
+            `UPDATE endpoint_flags SET workspaces_json = ?, state = ?, multiplier = ?,
+                reports = ?, updated_at = ?, expires_at = ?
+             WHERE endpoint_id = ? AND cluster_id = ? AND kind = ?`,
+            JSON.stringify(left),
+            demote ? "provisional" : r.state,
+            demote
+                ? SEVERE_FLAG.provisionalMultiplier
+                : r.state === "confirmed"
+                ? SEVERE_FLAG.confirmedMultiplier
+                : SEVERE_FLAG.provisionalMultiplier,
+            left.length,
+            now,
+            demote
+                ? Math.min(r.expires_at, now + SEVERE_FLAG.provisionalTtlMs)
+                : r.expires_at,
+            ...key,
+        );
     }
 }
 
