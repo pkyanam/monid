@@ -7,9 +7,10 @@
  *
  * Parent means weight each endpoint ONCE (the average of the children's shrunk
  * means, with the parent itself as one extra pseudo-child) instead of pooling
- * raw counts. Implicit evidence is lopsided (a success adds 0.05, a failure 1),
- * so with pooling a single failing endpoint became its cluster's norm and its
- * own term came out near zero; the M4 sim caught that.
+ * raw counts. Traffic is uneven (agents mostly take rank 1) and quality
+ * evidence is lopsided (a clean success adds 0.05), so with pooling a single
+ * busy, failing endpoint became its cluster's norm and its own term came out
+ * near zero; the M4 sim caught that.
  */
 import { betaQuantile } from "./beta.ts";
 

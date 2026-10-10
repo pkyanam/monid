@@ -163,10 +163,11 @@ export function startStubHost(opts: StubOptions = {}) {
             const u = rand();
             const failed = u < fault.errorRate;
             const empty = !failed && u < fault.errorRate + fault.emptyRate;
-            // Implicit signals with the agreed weights: a clean success is worth 0.05.
-            if (failed) addEvidence(e.id, "reliability", 0, 1);
-            else if (empty) addEvidence(e.id, "quality", 0, 1);
-            else addEvidence(e.id, "reliability", 0.05, 0);
+            // Implicit signals (README): every run is one reliability trial; a clean
+            // success is also a weak (0.05) quality positive, an empty result a quality negative.
+            addEvidence(e.id, "reliability", failed ? 0 : 1, failed ? 1 : 0);
+            if (empty) addEvidence(e.id, "quality", 0, 1);
+            else if (!failed) addEvidence(e.id, "quality", 0.05, 0);
 
             const n = ++seq;
             const final = failed ? "FAILED" : "COMPLETED";

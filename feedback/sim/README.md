@@ -100,9 +100,11 @@ always seeded.
 
 - a fixed candidate list with no BM25
 - synthetic run outputs
-- in-memory evidence with no decay or trust (failure: reliability f+1; empty:
-  quality f+1; clean success: reliability s+0.05; feedback rating r: s =
-  (r+2)/4)
+- in-memory evidence with no decay or trust, using the agreed implicit weights:
+  every run is one reliability trial (s+1, or f+1 on failure); a clean success
+  also adds quality s+0.05; an empty result adds quality f+1; feedback with
+  rating r adds s = (r+2)/4, f = 1-s to reliability (aspects `reliability` or
+  `latency`) or to quality (anything else)
 - a snapshot rebuilt on a timer with `@monid/feedback-rerank`
 - no health signal
 

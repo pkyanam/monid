@@ -234,26 +234,25 @@ Deno.test("no eligible candidate to explore means propensity 1 everywhere", () =
 });
 
 Deno.test("a high-volume failing endpoint doesn't become its cluster's norm", () => {
-    // Implicit evidence is lopsided: a success adds 0.05, a failure adds 1.
-    const lopsided = buildSnapshot([
-        {
-            endpoint: "bad",
-            cluster: "news",
-            aspect: "reliability",
-            s: 0.05 * 20,
-            f: 30,
-        },
-        ...["a", "b", "c", "d"].map((endpoint) => ({
-            endpoint,
-            cluster: "news",
-            aspect: "reliability" as const,
-            s: 0.05 * 30,
-            f: 0,
-        })),
+    // One endpoint gets most of the traffic. With pooled counts its 60% failure
+    // rate would become the cluster's norm and its own term would be near zero.
+    const reliability = (
+        endpoint: string,
+        s: number,
+        f: number,
+    ): EvidenceRow => ({
+        endpoint,
+        cluster: "news",
+        aspect: "reliability",
+        s,
+        f,
+    });
+    const skewed = buildSnapshot([
+        reliability("bad", 400, 600),
+        ...["a", "b", "c", "d"].map((e) => reliability(e, 30, 0)),
     ], { version: 1, builtAt: "2026-10-10T00:00:00Z" });
     const term = (endpoint: string) =>
-        rerank(cands(endpoint), lopsided, { ...ctx, epsilon: 0 }).ranked[0]
-            .term;
+        rerank(cands(endpoint), skewed, { ...ctx, epsilon: 0 }).ranked[0].term;
     assert(term("bad") < -0.05, `bad ${term("bad")}`);
     assert(term("a") > 0, `a ${term("a")}`);
 });

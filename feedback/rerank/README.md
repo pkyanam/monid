@@ -31,9 +31,9 @@ strength `k` (default 10):
 
 `avg(parent, children)` counts the parent as one extra child. Each endpoint
 counts once toward its cluster's mean, however much traffic it has. Pooled raw
-counts don't work here because implicit evidence is lopsided (a clean success
-adds 0.05, a failure adds 1): one failing endpoint became its cluster's norm,
-and its own term came out near zero. The M4 sim found this.
+counts don't work here: traffic is uneven (agents mostly take rank 1), and
+quality evidence is lopsided. With pooling, one busy failing endpoint became its
+cluster's norm, and its own term came out near zero. The M4 sim found this.
 
 Each cell stores `lower`, the weighted (default reliability 0.7, quality 0.3)
 sum of each aspect's **10th percentile**, and `width`, the weighted 10-90%
@@ -77,29 +77,40 @@ for logging.
 
 ## Tuning
 
-Weights are reliability 0.7 and quality 0.3. Failures count against reliability
-only; counting them against quality too would count the same evidence twice.
+**Signal weights** (implicit, per run; the sim stub uses these and the host's
+aggregation should match):
 
-The gain is checked by `tuning_test.ts`. The test cluster is a dense news-search
-cluster with 5 endpoints and 200 runs each (the sim's dense endpoints saw
-roughly 180-255). It uses implicit signals only, weighted like the sim: failure
-1, clean success 0.05. Each cell is the feedback term:
+| event                | reliability | quality  |
+| -------------------- | ----------- | -------- |
+| run failed           | f + 1       |          |
+| run completed, empty | s + 1       | f + 1    |
+| run completed, clean | s + 1       | s + 0.05 |
 
-| gain | (a) 60% failures | (b) 10% failures | (c) healthy  |
-| ---- | ---------------- | ---------------- | ------------ |
-| 0.5  | -0.116           | -0.034           | +0.102       |
-| 0.75 | -0.150 (cap)     | -0.051           | +0.150 (cap) |
-| 1.0  | -0.150 (cap)     | -0.067           | +0.150 (cap) |
+So reliability is an honest per-run success rate. A clean success is only a weak
+quality positive, and failures never count against quality, which would count
+the same evidence twice. Aspect weights are reliability 0.7 and quality 0.3.
 
-Rule: take the lowest gain where (a) is in [-0.15, -0.10], (b) >= -0.03, and (c)
-< 0.15. **No gain in the set meets all three**, so the default stays at 0.5, the
-closest option: (a) and (c) hold, and (b) misses by 0.004.
+**Gain sweep** (`tuning_test.ts`): a news-search cluster with 5 endpoints at 60%
+failures (a), 10% failures (b) and three healthy (c), using implicit signals
+only. Each entry is a / b / c:
 
-(b) can't be fixed with gain. With successes worth 0.05, an endpoint failing 10%
-of the time has a reliability mean of about 0.31 (0.045 / 0.145), and more
-traffic only pushes its lower bound down. At gain 0.5 it passes up to about 150
-runs per endpoint and fails beyond that. Fixing it means changing the signal
-weights (the 0.05 success weight), not the gain.
+| gain | 50 runs each                 | 200 runs each                | 1000 runs each               |
+| ---- | ---------------------------- | ---------------------------- | ---------------------------- |
+| 0.5  | -0.0967 / +0.065 / +0.104    | -0.1012 / +0.078 / +0.119    | -0.0995 / +0.079 / +0.117    |
+| 0.75 | -0.145 / +0.097 / +0.150 cap | -0.150 / +0.116 / +0.150 cap | -0.149 / +0.118 / +0.150 cap |
+| 1.0  | -0.150 / +0.129 / +0.150 cap | -0.150 / +0.150 / +0.150 cap | -0.150 / +0.150 / +0.150 cap |
+
+**Rule**: take the lowest gain where, at every volume, (a) is in [-0.15, -0.10],
+(b) >= -0.03, and (c) < 0.15.
+
+**No gain in the set passes**, so the default stays at 0.5, the closest option.
+There, (b) and (c) hold everywhere, but (a) misses -0.10 by about 0.003 at 50
+runs and 0.0005 at 1000 runs. At 0.75 and 1.0, healthy endpoints hit the cap.
+**Gain 0.6 would pass at every volume** (a ≈ -0.12, b ≈ +0.08 to +0.09, c ≈
++0.12 to +0.14). The test asserts that, but 0.6 is not adopted.
+
+(b) comes out positive because the cluster average includes the 60%-failure
+endpoint, so a 10%-failure endpoint is above average.
 
 ## Caveat
 

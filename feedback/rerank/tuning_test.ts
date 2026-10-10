@@ -1,33 +1,48 @@
 /**
- * Gain sweep behind the default `gain` (see README, "Tuning"). A dense,
- * sim-like news-search cluster: 5 endpoints with RUNS runs each (the sim's
- * dense endpoints saw roughly 180-255), implicit signals only, weighted like
- * the sim: failure 1, clean success 0.05.
+ * Gain sweep behind the default `gain` (README, "Tuning"). A news-search
+ * cluster with 5 endpoints (60% failures, 10% failures, three healthy) at
+ * 50, 200 and 1000 runs each, implicit signals only, with the agreed weights:
+ * every run is one reliability trial (s = 1 or f = 1) and a clean success also
+ * adds 0.05 to quality.
  */
-import { assert, assertAlmostEquals, assertEquals } from "@std/assert";
+import { assert, assertAlmostEquals } from "@std/assert";
 import { rerank } from "./rerank.ts";
 import { buildSnapshot, type EvidenceRow } from "./snapshot.ts";
 
-const RUNS = 200;
 const GAINS = [0.5, 0.75, 1.0];
+const VOLUMES = [50, 200, 1000];
 
-const row = (endpoint: string, failRate: number): EvidenceRow => ({
-    endpoint,
-    cluster: "news-search",
-    aspect: "reliability",
-    s: 0.05 * RUNS * (1 - failRate),
-    f: RUNS * failRate,
-});
-const rows = [
-    row("fail60", 0.6),
-    row("fail10", 0.1),
-    row("ok1", 0),
-    row("ok2", 0),
-    row("ok3", 0),
-];
+function evidence(runs: number): EvidenceRow[] {
+    const endpoints: [string, number][] = [
+        ["fail60", 0.6],
+        ["fail10", 0.1],
+        ["ok1", 0],
+        ["ok2", 0],
+        ["ok3", 0],
+    ];
+    return endpoints.flatMap(([endpoint, failRate]) => {
+        const ok = runs * (1 - failRate);
+        return [
+            {
+                endpoint,
+                cluster: "news-search",
+                aspect: "reliability",
+                s: ok,
+                f: runs - ok,
+            },
+            {
+                endpoint,
+                cluster: "news-search",
+                aspect: "quality",
+                s: 0.05 * ok,
+                f: 0,
+            },
+        ];
+    });
+}
 
-function terms(gain?: number) {
-    const snapshot = buildSnapshot(rows, {
+function terms(runs: number, gain?: number) {
+    const snapshot = buildSnapshot(evidence(runs), {
         version: 1,
         builtAt: "2026-10-10T00:00:00Z",
         gain,
@@ -39,33 +54,65 @@ function terms(gain?: number) {
             limit: 1,
             epsilon: 0,
         }).ranked[0].term;
-    return { a: term("fail60"), b: term("fail10"), c: term("ok1") };
+    return [term("fail60"), term("fail10"), term("ok1")];
 }
 
-/** (a) 60% failures lands in [-15%, -10%]; (b) 10% failures stays >= -3%; (c) healthy stays below the cap. */
-const meets = ({ a, b, c }: ReturnType<typeof terms>) =>
+/** (a) 60% failures in [-0.15, -0.10]; (b) 10% failures >= -0.03; (c) healthy below the +0.15 cap. */
+const meets = ([a, b, c]: number[]) =>
     a >= -0.15 && a <= -0.10 && b >= -0.03 && c < 0.15;
 
-Deno.test("gain sweep table (README, Tuning)", () => {
-    const expected: Record<number, [number, number, number]> = {
-        0.5: [-0.1160, -0.0337, 0.1017],
-        0.75: [-0.15, -0.0505, 0.15],
-        1.0: [-0.15, -0.0673, 0.15],
-    };
+// TABLE[gain][volume] = [(a), (b), (c)]
+const TABLE: Record<number, Record<number, number[]>> = {
+    0.5: {
+        50: [-0.0967, 0.0647, 0.1039],
+        200: [-0.1012, 0.0776, 0.1187],
+        1000: [-0.0995, 0.0787, 0.1173],
+    },
+    0.75: {
+        50: [-0.1451, 0.0970, 0.15],
+        200: [-0.15, 0.1164, 0.15],
+        1000: [-0.1492, 0.1181, 0.15],
+    },
+    1.0: {
+        50: [-0.15, 0.1293, 0.15],
+        200: [-0.15, 0.15, 0.15],
+        1000: [-0.15, 0.15, 0.15],
+    },
+};
+
+Deno.test("gain x volume sweep table (README, Tuning)", () => {
     for (const gain of GAINS) {
-        const { a, b, c } = terms(gain);
-        const [ea, eb, ec] = expected[gain];
-        assertAlmostEquals(a, ea, 5e-5, `gain ${gain} (a)`);
-        assertAlmostEquals(b, eb, 5e-5, `gain ${gain} (b)`);
-        assertAlmostEquals(c, ec, 5e-5, `gain ${gain} (c)`);
+        for (const runs of VOLUMES) {
+            terms(runs, gain).forEach((t, i) =>
+                assertAlmostEquals(
+                    t,
+                    TABLE[gain][runs][i],
+                    5e-5,
+                    `gain ${gain}, ${runs} runs, (${"abc"[i]})`,
+                )
+            );
+        }
     }
 });
 
-Deno.test("selection rule: no gain in the set meets all three, so the default stays 0.5", () => {
-    assertEquals(GAINS.find((g) => meets(terms(g))), undefined);
-    const atDefault = terms();
-    assertEquals(atDefault, terms(0.5));
-    // Closest option: (a) and (c) hold; (b) misses -3% by under half a point.
-    assert(atDefault.a >= -0.15 && atDefault.a <= -0.10 && atDefault.c < 0.15);
-    assert(atDefault.b < -0.03 && atDefault.b > -0.035);
+Deno.test("selection rule: no gain in the set passes at every volume, so the default stays 0.5", () => {
+    const passing = GAINS.filter((g) =>
+        VOLUMES.every((runs) => meets(terms(runs, g)))
+    );
+    assert(passing.length === 0, `passing: ${passing}`);
+    for (const runs of VOLUMES) {
+        const [a, b, c] = terms(runs); // default gain
+        assertAlmostEquals(a, TABLE[0.5][runs][0], 5e-5);
+        // Closest option: (b) and (c) hold everywhere; (a) misses -0.10 by under half a point at 50 and 1000 runs.
+        assert(
+            b >= -0.03 && c < 0.15 && a <= -0.095 && a >= -0.15,
+            `${runs} runs: ${a}, ${b}, ${c}`,
+        );
+    }
+});
+
+Deno.test("gain 0.6, outside the set, would pass at every volume (not adopted)", () => {
+    for (const runs of VOLUMES) {
+        assert(meets(terms(runs, 0.6)), `${runs} runs: ${terms(runs, 0.6)}`);
+    }
 });
