@@ -232,3 +232,28 @@ Deno.test("no eligible candidate to explore means propensity 1 everywhere", () =
     );
     assertEquals(rerank(candidates, snap(1), { ...ctx, limit: 0 }).ranked, []);
 });
+
+Deno.test("a high-volume failing endpoint doesn't become its cluster's norm", () => {
+    // Implicit evidence is lopsided: a success adds 0.05, a failure adds 1.
+    const lopsided = buildSnapshot([
+        {
+            endpoint: "bad",
+            cluster: "news",
+            aspect: "reliability",
+            s: 0.05 * 20,
+            f: 30,
+        },
+        ...["a", "b", "c", "d"].map((endpoint) => ({
+            endpoint,
+            cluster: "news",
+            aspect: "reliability" as const,
+            s: 0.05 * 30,
+            f: 0,
+        })),
+    ], { version: 1, builtAt: "2026-10-10T00:00:00Z" });
+    const term = (endpoint: string) =>
+        rerank(cands(endpoint), lopsided, { ...ctx, epsilon: 0 }).ranked[0]
+            .term;
+    assert(term("bad") < -0.05, `bad ${term("bad")}`);
+    assert(term("a") > 0, `a ${term("a")}`);
+});

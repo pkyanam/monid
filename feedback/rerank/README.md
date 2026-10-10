@@ -23,10 +23,17 @@ Evidence rows are `{endpoint, cluster, aspect, s, f}` with aspect
 `reliability | quality`. Shrinkage is hierarchical empirical Bayes with prior
 strength `k` (default 10):
 
-- global mean `mu_g = (1 + S) / (2 + S + F)`
-- cluster prior `Beta(k*mu_c, k*(1-mu_c))`,
-  `mu_c = (k*mu_g + S_c) / (k + S_c + F_c)`
+- global mean `mu_g = avg(0.5, (1 + s_i) / (2 + s_i + f_i) for every cell i)`
+- cluster mean
+  `mu_c = avg(mu_g, (k*mu_g + s_e) / (k + s_e + f_e) for every endpoint e in c)`
+- cluster prior `Beta(k*mu_c, k*(1-mu_c))`
 - cell posterior `Beta(k*mu_c + s, k*(1-mu_c) + f)`
+
+`avg(parent, children)` counts the parent as one extra child. Each endpoint
+counts once toward its cluster's mean, however much traffic it has. Pooled raw
+counts don't work here because implicit evidence is lopsided (a clean success
+adds 0.05, a failure adds 1): one failing endpoint became its cluster's norm,
+and its own term came out near zero. The M4 sim found this.
 
 Each cell stores `lower`, the weighted (default 0.5/0.5) sum of each aspect's
 **10th percentile**, and `width`, the weighted 10-90% interval width. The Beta

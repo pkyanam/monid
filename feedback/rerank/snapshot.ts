@@ -2,9 +2,14 @@
  * Snapshot scorer: aggregated, decayed evidence in, immutable ranking snapshot out.
  *
  * Shrinkage is hierarchical empirical Bayes, global(aspect) -> cluster(aspect)
- * -> (endpoint, cluster, aspect). Each level's prior is Beta(k*mu, k*(1-mu))
- * where mu is the parent's posterior mean, so thin cells lean on their cluster
- * and dense cells speak for themselves.
+ * -> (endpoint, cluster, aspect). A cell's prior is Beta(k*mu_c, k*(1-mu_c)),
+ * so thin cells lean on their cluster and dense cells speak for themselves.
+ *
+ * Parent means weight each endpoint ONCE (the average of the children's shrunk
+ * means, with the parent itself as one extra pseudo-child) instead of pooling
+ * raw counts. Implicit evidence is lopsided (a success adds 0.05, a failure 1),
+ * so with pooling a single failing endpoint became its cluster's norm and its
+ * own term came out near zero; the M4 sim caught that.
  */
 import { betaQuantile } from "./beta.ts";
 
@@ -93,11 +98,7 @@ export function buildSnapshot(
         quality: raw.quality / total,
     };
 
-    const global = emptyMass();
-    const clusters = new Map<
-        string,
-        { mass: Mass; endpoints: Map<string, Mass> }
-    >();
+    const clusters = new Map<string, Map<string, Mass>>();
     for (const { endpoint, cluster, aspect, s, f } of rows) {
         if (!(s >= 0 && f >= 0 && Number.isFinite(s + f))) {
             throw new RangeError(
@@ -105,18 +106,11 @@ export function buildSnapshot(
             );
         }
         let c = clusters.get(cluster);
-        if (!c) {
-            clusters.set(
-                cluster,
-                c = { mass: emptyMass(), endpoints: new Map() },
-            );
-        }
-        let e = c.endpoints.get(endpoint);
-        if (!e) c.endpoints.set(endpoint, e = emptyMass());
-        for (const m of [global, c.mass, e]) {
-            m[aspect].s += s;
-            m[aspect].f += f;
-        }
+        if (!c) clusters.set(cluster, c = new Map());
+        let e = c.get(endpoint);
+        if (!e) c.set(endpoint, e = emptyMass());
+        e[aspect].s += s;
+        e[aspect].f += f;
     }
 
     const cell = (beta: (a: Aspect) => BetaParams): Cell => {
@@ -140,20 +134,33 @@ export function buildSnapshot(
         strength: number,
         m: { s: number; f: number },
     ) => (strength * mu + m.s) / (strength + m.s + m.f);
+    const average = (parent: number, children: number[]) =>
+        (parent + children.reduce((x, y) => x + y, 0)) / (1 + children.length);
 
-    // The global mean starts from a uniform Beta(1, 1), so it is 0.5 with no evidence.
-    const globalMean = (a: Aspect) => shrunk(0.5, 2, global[a]);
-    const globalPrior = priorCell(globalMean);
+    // Global: every (endpoint, cluster) cell's Beta(1, 1)-smoothed rate, around 0.5.
+    const allCells = [...clusters.values()].flatMap((c) => [...c.values()]);
+    const g = Object.fromEntries(
+        ASPECTS.map((a) => [
+            a,
+            average(0.5, allCells.map((m) => shrunk(0.5, 2, m[a]))),
+        ]),
+    );
+    const globalPrior = priorCell((a) => g[a]);
     // Built with Object.fromEntries so ids like "__proto__" become plain own keys.
     const clusterPriors: [string, Cell][] = [];
     const cells: [string, Record<string, Cell>][] = [];
     for (const [clusterId, c] of clusters) {
-        const prior = priorCell((a) => shrunk(globalMean(a), k, c.mass[a]));
+        const prior = priorCell((a) =>
+            average(
+                g[a],
+                [...c.values()].map((m) => shrunk(g[a], k, m[a])),
+            )
+        );
         clusterPriors.push([clusterId, prior]);
         cells.push([
             clusterId,
             Object.fromEntries(
-                [...c.endpoints].map(([endpoint, m]) => [
+                [...c].map(([endpoint, m]) => [
                     endpoint,
                     cell((a) => ({
                         alpha: prior[a].alpha + m[a].s,
