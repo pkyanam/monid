@@ -41,7 +41,7 @@ interval width. The Beta quantile is computed in `beta.ts` (Halley iteration on
 the regularized incomplete beta); tests check it against scipy.
 
 ```
-term  = clamp(gain * (cell.lower - clusterPrior.lower), -0.15, +0.15)   gain = 0.5
+term  = clamp(gain * (cell.lower - clusterPrior.lower), -0.15, +0.15)   gain = 0.6
 final = baseScore * health * flag * (1 + term)
 ```
 
@@ -51,7 +51,7 @@ feedback cannot. Latency and cost don't enter feedback cells; they come from
 live metrics.
 
 Because `lower` is pessimistic, a well-measured endpoint that performs at its
-cluster's average earns a small bonus over an unmeasured one (about +5-7% at n =
+cluster's average earns a small bonus over an unmeasured one (about +6-9% at n =
 100-1000 in a synthetic example). Unmeasured endpoints are neutral, not
 penalized, and exploration is what gives them traffic.
 
@@ -97,17 +97,17 @@ only. Each entry is a / b / c:
 | gain | 50 runs each                 | 200 runs each                | 1000 runs each               |
 | ---- | ---------------------------- | ---------------------------- | ---------------------------- |
 | 0.5  | -0.0967 / +0.065 / +0.104    | -0.1012 / +0.078 / +0.119    | -0.0995 / +0.079 / +0.117    |
+| 0.6  | -0.116 / +0.078 / +0.125     | -0.121 / +0.093 / +0.143     | -0.119 / +0.095 / +0.141     |
 | 0.75 | -0.145 / +0.097 / +0.150 cap | -0.150 / +0.116 / +0.150 cap | -0.149 / +0.118 / +0.150 cap |
 | 1.0  | -0.150 / +0.129 / +0.150 cap | -0.150 / +0.150 / +0.150 cap | -0.150 / +0.150 / +0.150 cap |
 
 **Rule**: take the lowest gain where, at every volume, (a) is in [-0.15, -0.10],
 (b) >= -0.03, and (c) < 0.15.
 
-**No gain in the set passes**, so the default stays at 0.5, the closest option.
-There, (b) and (c) hold everywhere, but (a) misses -0.10 by about 0.003 at 50
-runs and 0.0005 at 1000 runs. At 0.75 and 1.0, healthy endpoints hit the cap.
-**Gain 0.6 would pass at every volume** (a ≈ -0.12, b ≈ +0.08 to +0.09, c ≈
-+0.12 to +0.14). The test asserts that, but 0.6 is not adopted.
+**Default: 0.6**, the lowest swept gain that passes at every volume. At 0.5, (a)
+misses -0.10 by 0.003 at 50 runs and 0.0005 at 1000 runs. At 0.75 and 1.0,
+healthy endpoints hit the cap. `tuning_test.ts` pins the table and asserts all
+three criteria at the default.
 
 (b) comes out positive because the cluster average includes the 60%-failure
 endpoint, so a 10%-failure endpoint is above average.
@@ -115,5 +115,5 @@ endpoint, so a 10%-failure endpoint is above average.
 ## Caveat
 
 This has only been tested on synthetic data. The defaults (`k = 10`,
-`gain = 0.5`, `epsilon = 0.1`, the 15% cap) are reasonable starting points, not
+`gain = 0.6`, `epsilon = 0.1`, the 15% cap) are reasonable starting points, not
 tuned values.

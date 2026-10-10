@@ -175,7 +175,7 @@ export function buildSnapshot(
     return deepFreeze({
         version: opts.version,
         builtAt: opts.builtAt,
-        params: { k, weights, gain: opts.gain ?? 0.5 },
+        params: { k, weights, gain: opts.gain ?? 0.6 },
         priors: {
             global: globalPrior,
             clusters: Object.fromEntries(clusterPriors),

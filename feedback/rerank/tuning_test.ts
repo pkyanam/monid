@@ -5,11 +5,11 @@
  * every run is one reliability trial (s = 1 or f = 1) and a clean success also
  * adds 0.05 to quality.
  */
-import { assert, assertAlmostEquals } from "@std/assert";
+import { assert, assertAlmostEquals, assertEquals } from "@std/assert";
 import { rerank } from "./rerank.ts";
 import { buildSnapshot, type EvidenceRow } from "./snapshot.ts";
 
-const GAINS = [0.5, 0.75, 1.0];
+const GAINS = [0.5, 0.6, 0.75, 1.0];
 const VOLUMES = [50, 200, 1000];
 
 function evidence(runs: number): EvidenceRow[] {
@@ -68,6 +68,11 @@ const TABLE: Record<number, Record<number, number[]>> = {
         200: [-0.1012, 0.0776, 0.1187],
         1000: [-0.0995, 0.0787, 0.1173],
     },
+    0.6: {
+        50: [-0.1161, 0.0776, 0.1246],
+        200: [-0.1214, 0.0931, 0.1425],
+        1000: [-0.1194, 0.0945, 0.1408],
+    },
     0.75: {
         50: [-0.1451, 0.0970, 0.15],
         200: [-0.15, 0.1164, 0.15],
@@ -95,24 +100,16 @@ Deno.test("gain x volume sweep table (README, Tuning)", () => {
     }
 });
 
-Deno.test("selection rule: no gain in the set passes at every volume, so the default stays 0.5", () => {
+Deno.test("selection rule: 0.6 is the lowest swept gain that passes at every volume, and the default", () => {
     const passing = GAINS.filter((g) =>
         VOLUMES.every((runs) => meets(terms(runs, g)))
     );
-    assert(passing.length === 0, `passing: ${passing}`);
+    assertEquals(passing, [0.6]); // 0.5 misses (a) at 50 and 1000 runs; 0.75 and 1.0 pin (c) at the cap
     for (const runs of VOLUMES) {
         const [a, b, c] = terms(runs); // default gain
-        assertAlmostEquals(a, TABLE[0.5][runs][0], 5e-5);
-        // Closest option: (b) and (c) hold everywhere; (a) misses -0.10 by under half a point at 50 and 1000 runs.
-        assert(
-            b >= -0.03 && c < 0.15 && a <= -0.095 && a >= -0.15,
-            `${runs} runs: ${a}, ${b}, ${c}`,
-        );
-    }
-});
-
-Deno.test("gain 0.6, outside the set, would pass at every volume (not adopted)", () => {
-    for (const runs of VOLUMES) {
-        assert(meets(terms(runs, 0.6)), `${runs} runs: ${terms(runs, 0.6)}`);
+        assertEquals([a, b, c], terms(runs, 0.6));
+        assert(a >= -0.15 && a <= -0.10, `${runs} runs (a): ${a}`);
+        assert(b >= -0.03, `${runs} runs (b): ${b}`);
+        assert(c < 0.15, `${runs} runs (c): ${c}`);
     }
 });
