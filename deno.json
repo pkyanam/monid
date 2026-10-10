@@ -6,13 +6,18 @@
         "./shared/compiler",
         "./shared/testing",
         "./engine",
-        "./feedback/rerank"
+        "./feedback/rerank",
+        "./feedback/sim"
     ],
     "tasks": {
         "check": "deno check .",
         "lint": "deno lint",
         "fmt": "deno fmt",
         "test": "deno test --allow-read --allow-env --allow-write",
+        "feedback:test": "deno test --allow-net=127.0.0.1 feedback/",
+        "sim": "deno run --allow-net --allow-env feedback/sim/sim.ts",
+        "sim:stub": "deno run --allow-net --allow-env feedback/sim/stub_host.ts",
+        "sim:bench": "deno run --allow-env=MONID_BENCH_ITERS feedback/sim/bench.ts",
         "test:live": "deno test --allow-read --allow-env --allow-write --allow-net",
         "compiler:compile": "deno run --allow-read --allow-write --allow-env --allow-run=git scripts/compile.ts",
         "engine:run": "deno run --unstable-kv --allow-read --allow-write --allow-env --allow-net --allow-run=git scripts/run.ts",
