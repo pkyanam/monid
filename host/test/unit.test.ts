@@ -161,3 +161,27 @@ Deno.test("host catalog: resolve, categories, wire price", async () => {
         assert(Number.isFinite(p.amount.value), e.id);
     }
 });
+
+Deno.test("host bm25: a long description does not dilute a title match", () => {
+    const filler = Array.from({ length: 80 }, (_, i) => `word${i}`).join(" ");
+    const index = new Bm25Index([
+        {
+            id: "long",
+            fields: [{ text: "news search", weight: 3 }, {
+                text: filler,
+                weight: 1,
+            }],
+        },
+        {
+            id: "short",
+            fields: [{ text: "news search", weight: 3 }, {
+                text: "brief",
+                weight: 1,
+            }],
+        },
+        { id: "other", fields: [{ text: "weather", weight: 3 }] },
+    ]);
+    const [a, b] = index.search("news search", 2);
+    // per-field length normalization: same title, same score
+    assertEquals(a.score.toFixed(6), b.score.toFixed(6));
+});

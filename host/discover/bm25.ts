@@ -1,8 +1,7 @@
 /**
- * BM25 over the catalog (v1 decision 1: no embeddings). Field weighting is
- * done the BM25F-lite way — a field's tokens are repeated `weight` times
- * into one bag — which is plenty for ~700 short documents. Scoring the whole
- * corpus is a few hundred microseconds; no ANN index, no external service.
+ * BM25 over the catalog (v1 decision 1: no embeddings), with BM25F field
+ * weighting (see Bm25Index). Scoring the whole corpus is a few hundred
+ * microseconds; no ANN index, no external service.
  */
 const STOPWORDS = new Set(
     ("a an and are as at be by for from get i in into is it its me my of on " +
@@ -105,36 +104,51 @@ export interface Bm25Hit {
     score: number;
 }
 
+/**
+ * BM25F: each field's term frequency is length-normalized against that
+ * field's own average before the weighted sum is saturated, so a long
+ * description does not dilute a match in a short title.
+ */
 export class Bm25Index {
     private readonly ids: string[] = [];
-    private readonly lengths: number[] = [];
-    /** term → (docIndex → tf) */
+    /** term → (docIndex → weighted, per-field normalized tf) */
     private readonly postings = new Map<string, Map<number, number>>();
-    private avgLength = 0;
 
     constructor(
         docs: Bm25Doc[],
         private readonly k1 = 1.2,
-        private readonly b = 0.75,
+        b = 0.75,
     ) {
-        let total = 0;
-        docs.forEach((doc, index) => {
-            this.ids.push(doc.id);
-            let length = 0;
-            for (const field of doc.fields) {
-                const tokens = tokenize(field.text);
-                const reps = Math.max(1, Math.round(field.weight));
-                for (const token of tokens) {
+        const tokenized = docs.map((doc) =>
+            doc.fields.map((f) => ({
+                tokens: tokenize(f.text),
+                weight: f.weight,
+            }))
+        );
+        // average length per field position (docs share a field layout)
+        const sums: number[] = [];
+        const counts: number[] = [];
+        for (const fields of tokenized) {
+            fields.forEach((f, i) => {
+                sums[i] = (sums[i] ?? 0) + f.tokens.length;
+                counts[i] = (counts[i] ?? 0) + 1;
+            });
+        }
+        tokenized.forEach((fields, index) => {
+            this.ids.push(docs[index].id);
+            fields.forEach((f, i) => {
+                const avg = sums[i] / counts[i] || 1;
+                const norm = 1 - b + b * f.tokens.length / avg;
+                for (const token of f.tokens) {
                     let posting = this.postings.get(token);
                     if (!posting) this.postings.set(token, posting = new Map());
-                    posting.set(index, (posting.get(index) ?? 0) + reps);
-                    length += reps;
+                    posting.set(
+                        index,
+                        (posting.get(index) ?? 0) + f.weight / norm,
+                    );
                 }
-            }
-            this.lengths.push(length);
-            total += length;
+            });
         });
-        this.avgLength = docs.length ? total / docs.length : 0;
     }
 
     get size(): number {
@@ -152,12 +166,8 @@ export class Bm25Index {
                 1 + (n - posting.size + 0.5) / (posting.size + 0.5),
             );
             for (const [doc, tf] of posting) {
-                const norm = tf * (this.k1 + 1) /
-                    (tf +
-                        this.k1 *
-                            (1 - this.b +
-                                this.b * this.lengths[doc] / this.avgLength));
-                scores.set(doc, (scores.get(doc) ?? 0) + idf * norm);
+                const sat = tf * (this.k1 + 1) / (tf + this.k1);
+                scores.set(doc, (scores.get(doc) ?? 0) + idf * sat);
             }
         }
         return [...scores.entries()]

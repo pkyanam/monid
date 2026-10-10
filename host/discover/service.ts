@@ -89,7 +89,11 @@ export interface DiscoverDeps {
 const DEFAULT_LIMIT = 10;
 const MAX_LIMIT = 50;
 const MIN_SHORTLIST = 20;
+/** Hits scored before the leaf boost reorders them. */
+const RECALL = 100;
 const CLUSTER_VOTERS = 10;
+/** Relevance multiplier for endpoints in the inferred leaf, at full confidence. */
+const LEAF_BOOST = 0.3;
 
 export class DiscoverService {
     private readonly index: Bm25Index;
@@ -120,10 +124,11 @@ export class DiscoverService {
     }
 
     /**
-     * Category leaf for the query: score-weighted vote over the top hits'
-     * categories (v1 cluster = category leaf). Ties break by leaf id.
+     * Category leaf for the query (v1 cluster = category leaf): a
+     * score-weighted vote over the top hits' categories, ties by leaf id.
+     * Confidence is the winner's margin over the runner-up (1 = unopposed).
      */
-    inferCluster(hits: Bm25Hit[]): string {
+    inferCluster(hits: Bm25Hit[]): { clusterId: string; confidence: number } {
         const votes = new Map<string, number>();
         for (const hit of hits.slice(0, CLUSTER_VOTERS)) {
             const cats = this.deps.catalog.get(hit.id)?.categories ?? [];
@@ -131,11 +136,37 @@ export class DiscoverService {
                 votes.set(cat, (votes.get(cat) ?? 0) + hit.score / cats.length);
             }
         }
-        const best =
-            [...votes.entries()].sort((a, b) =>
-                b[1] - a[1] || a[0].localeCompare(b[0])
-            )[0];
-        return best?.[0] ?? "uncategorized";
+        const [best, second] = [...votes.entries()].sort((a, b) =>
+            b[1] - a[1] || a[0].localeCompare(b[0])
+        );
+        if (!best) return { clusterId: "uncategorized", confidence: 0 };
+        return {
+            clusterId: best[0],
+            confidence: 1 - (second?.[1] ?? 0) / best[1],
+        };
+    }
+
+    /**
+     * Endpoints in the query's leaf get up to LEAF_BOOST more relevance,
+     * scaled by confidence: a curated category is evidence a lexical match
+     * on one shared word ("headline" on a profile scraper) is not.
+     */
+    private leafRerank(
+        hits: Bm25Hit[],
+        clusterId: string,
+        confidence: number,
+    ): Bm25Hit[] {
+        const boost = 1 + LEAF_BOOST * confidence;
+        return hits
+            .map((h) => ({
+                id: h.id,
+                score: this.deps.catalog.get(h.id)?.categories.includes(
+                        clusterId,
+                    )
+                    ? h.score * boost
+                    : h.score,
+            }))
+            .sort((a, b) => b.score - a.score || a.id.localeCompare(b.id));
     }
 
     discover(
@@ -159,8 +190,10 @@ export class DiscoverService {
         const now = clock();
 
         const shortlistSize = Math.max(limit * 2, MIN_SHORTLIST);
-        const hits = this.index.search(query, shortlistSize);
-        const clusterId = this.inferCluster(hits);
+        const recalled = this.index.search(query, RECALL);
+        const { clusterId, confidence } = this.inferCluster(recalled);
+        const hits = this.leafRerank(recalled, clusterId, confidence)
+            .slice(0, shortlistSize);
         const arm: Arm = opts.arm ?? assignArm(
             workspaceId,
             this.deps.experimentSalt,

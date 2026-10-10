@@ -67,15 +67,25 @@ docker run -d --name monid-sim-host -p 8789:8080 \
   -e MONID_HOST_API_KEYS=monid_sim_alpha:ws_a,monid_sim_beta:ws_b -e MONID_ADMIN_KEY=monid_admin_sim \
   -e MONID_HOST_TRANSPORT=fake -e MONID_HEALTH_IGNORE_FAULTS=1 \
   -e MONID_SNAPSHOT_INTERVAL_MS=60000 -e MONID_DECAY_HALF_LIFE_MS=60000 -e MONID_HOST_RETRY_WINDOW_MS=5000 \
-  -e 'MONID_HOST_DISCOVER_ALLOW=opoint#search,search1api#news,akta#v1/news,octen#search,tinyfish#search' \
   monid-host
 MONID_API_BASE_URL=http://localhost:8789 MONID_SIM_KEYS=monid_sim_alpha,monid_sim_beta \
   MONID_SIM_ARMS=treatment,control MONID_ADMIN_KEY=monid_admin_sim \
   MONID_SNAPSHOT_INTERVAL_MS=60000 MONID_DECAY_HALF_LIFE_MS=60000 deno task sim
 ```
 
-`MONID_HOST_DISCOVER_ALLOW` limits discover to the scenario's five
-fixture-backed endpoints: over the full 701-endpoint catalog, real BM25 does not
-put `opoint#search` in the top 5 for the sim's queries, and one query votes
-`funding-data`. `MONID_SIM_ARMS` is needed because two hashed workspaces rarely
-land in different arms at 10% control.
+The sim runs over the full catalog. Endpoints without recorded fixtures fail
+under the fake transport (501), so live health hides them after three failed
+runs, in both arms. `MONID_SIM_ARMS` is needed because two hashed workspaces
+rarely land in different arms at 10% control. `MONID_HOST_DISCOVER_ALLOW` is
+still there for narrowing discover in tests.
+
+## Discover ranking
+
+BM25F over each endpoint's title (×3), provider (×2), summary (×2), category
+names (×2), description and notes (×1); each field is length-normalized against
+its own average, so a long description does not dilute a title match. The leaf
+(`clusterId`) is a score-weighted category vote over the top 10 of 100 recalled
+hits; endpoints in that leaf then get up to +30% relevance, scaled by the vote's
+margin over the runner-up leaf. `test/discover_quality.test.ts` checks leaf and
+top-5 topicality for queries across news, funding, people, scraping, SEO and
+video/image generation.
